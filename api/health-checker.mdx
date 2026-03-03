@@ -1,0 +1,206 @@
+---
+title: HealthChecker
+description: Performs periodic health checks on backend servers and automatically updates their availability status
+---
+
+## Overview
+
+The `HealthChecker` class runs periodic health checks against all backend servers in the pool. It sends HTTP requests to each backend and updates their health status based on responses, ensuring the load balancer only routes traffic to healthy servers.
+
+## Constructor
+
+Creates a new HealthChecker instance with the specified backend pool and check interval.
+
+```typescript
+constructor(backendPool: BackendPool, intervalMs: number = 5000)
+```
+
+<ParamField path="backendPool" type="BackendPool" required>
+  The backend pool to monitor. The health checker will verify all backends in this pool and update their health status.
+</ParamField>
+
+<ParamField path="intervalMs" type="number" default="5000">
+  The interval between health check cycles in milliseconds. Default is 5000ms (5 seconds).
+</ParamField>
+
+## Methods
+
+### start()
+
+Starts the periodic health check loop.
+
+```typescript
+start(): void
+```
+
+**Behavior:**
+- Performs an immediate health check on all backends
+- Starts the periodic health check loop at the configured interval
+- No-op if health checker is already running
+- Runs asynchronously without blocking
+
+### stop()
+
+Stops the periodic health check loop.
+
+```typescript
+stop(): void
+```
+
+**Behavior:**
+- Sets the running flag to false
+- The health check loop will terminate after the current cycle completes
+- Does not interrupt in-flight health check requests
+
+### checkAll()
+
+Performs a health check on all backends in the pool.
+
+```typescript
+async checkAll(): Promise<void>
+```
+
+**Returns:** `Promise<void>` - Resolves when all health checks complete.
+
+**Behavior:**
+- Retrieves all backends from the pool (both healthy and unhealthy)
+- Sends HTTP requests to each backend concurrently
+- Uses AbortController with 3-second timeout per request
+- Marks backends healthy if response status is OK (2xx)
+- Marks backends unhealthy if response fails or times out
+- Logs health status for each backend
+
+## AbortController timeout mechanism
+
+The health checker uses `AbortController` to implement request timeouts, ensuring health checks don't hang indefinitely:
+
+```typescript
+const controller = new AbortController();
+const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+const res = await fetch(backend.url, { signal: controller.signal });
+clearTimeout(timeoutId);
+```
+
+**How it works:**
+1. Creates an `AbortController` for each health check request
+2. Sets a 3-second timeout that calls `controller.abort()`
+3. Passes the abort signal to the fetch request
+4. If timeout triggers, the fetch is aborted and throws an error
+5. If fetch completes first, the timeout is cleared
+6. Aborted or failed requests result in the backend being marked unhealthy
+
+## Health check criteria
+
+**Backend marked healthy when:**
+- HTTP request completes within 3 seconds
+- Response status is in the 2xx range (`res.ok === true`)
+
+**Backend marked unhealthy when:**
+- HTTP request times out (>3 seconds)
+- Response status is outside 2xx range
+- Network error or connection refused
+- Any other fetch error occurs
+
+## Usage examples
+
+### Basic setup
+
+```typescript
+import { HealthChecker } from './healthchecker/healthChecker';
+import { BackendPool } from './balancer/pool';
+
+const pool = new BackendPool([
+  'http://localhost:3001',
+  'http://localhost:3002',
+  'http://localhost:3003'
+]);
+
+// Create health checker with 5-second interval (default)
+const healthChecker = new HealthChecker(pool);
+
+// Start monitoring
+healthChecker.start();
+```
+
+### Custom check interval
+
+```typescript
+// Check every 10 seconds instead of default 5 seconds
+const healthChecker = new HealthChecker(pool, 10000);
+healthChecker.start();
+```
+
+### Manual health check
+
+```typescript
+// Perform a one-time health check without starting the loop
+const healthChecker = new HealthChecker(pool);
+await healthChecker.checkAll();
+
+console.log('Health check complete');
+console.log('Healthy backends:', pool.getHealthyBackends().length);
+```
+
+### Starting and stopping
+
+```typescript
+const healthChecker = new HealthChecker(pool, 5000);
+
+// Start health checks
+healthChecker.start();
+console.log('Health checker started');
+
+// Later, stop health checks (e.g., during graceful shutdown)
+setTimeout(() => {
+  healthChecker.stop();
+  console.log('Health checker stopped');
+}, 60000);
+```
+
+### Complete load balancer setup
+
+```typescript
+import express from 'express';
+import { BackendPool } from './balancer/pool';
+import { LoadBalancer } from './balancer/loadBalancer';
+import { RoundRobin } from './balancer/roundRobin';
+import { HealthChecker } from './healthchecker/healthChecker';
+import { ProxyHandler } from './proxy/proxyHandler';
+
+const app = express();
+
+// Setup backend pool
+const pool = new BackendPool([
+  'http://localhost:3001',
+  'http://localhost:3002',
+  'http://localhost:3003'
+]);
+
+// Setup load balancer
+const strategy = new RoundRobin();
+const loadBalancer = new LoadBalancer(pool, strategy);
+
+// Start health checks
+const healthChecker = new HealthChecker(pool, 5000);
+healthChecker.start();
+
+// Setup proxy
+app.use('*', ProxyHandler(loadBalancer, pool));
+
+const server = app.listen(8080, () => {
+  console.log('Load balancer running on port 8080');
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  healthChecker.stop();
+  server.close();
+});
+```
+
+## Related
+
+- [BackendPool](/api/backend-pool) - Backend collection managed by health checker
+- [LoadBalancer](/api/load-balancer) - Uses health status for routing decisions
+- [ProxyHandler](/api/proxy-handler) - Also marks backends unhealthy on proxy errors

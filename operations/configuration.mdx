@@ -1,0 +1,147 @@
+---
+title: Configuration
+description: Configure backend servers, health checks, and load balancer settings
+---
+
+## Overview
+
+The HTTP Load Balancer is currently configured through code in the main entry point. All settings including backend URLs, health check intervals, and port configuration are defined in `src/index.ts`.
+
+<Info>
+  Configuration file support (YAML/JSON) is on the roadmap for future releases. Track progress in the project's possible extensions.
+</Info>
+
+## Backend server configuration
+
+Backend servers are currently hardcoded as an array of URLs in the main application file.
+
+<Steps>
+  <Step title="Define backend URLs">
+    Edit the `backendUrls` array in `src/index.ts` to specify your backend servers:
+
+    ```typescript src/index.ts
+    const backendUrls = [
+        "http://localhost:3001",
+        "http://localhost:3002",
+        "http://localhost:3003"
+    ];
+    ```
+  </Step>
+
+  <Step title="Initialize the backend pool">
+    The backend pool is automatically created from the URL array:
+
+    ```typescript src/index.ts
+    const backendPool = new BackendPool(backendUrls);
+    const strategy = new RoundRobin();
+    const loadBalancer = new LoadBalancer(backendPool, strategy);
+    ```
+  </Step>
+
+  <Step title="Restart the load balancer">
+    Changes to backend configuration require restarting the load balancer:
+
+    ```bash
+    bun run start
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  All backends start with `health: true` by default. The health checker will verify their actual status on first run.
+</Warning>
+
+## Health check configuration
+
+Health checks are configured when initializing the `HealthChecker` class.
+
+### Check interval
+
+The second parameter to `HealthChecker` sets the interval between health check cycles (in milliseconds):
+
+```typescript src/index.ts
+const healthChecker = new HealthChecker(backendPool, 5000);
+healthChecker.start();
+Logger.info("Health checker started (checking every 5s)");
+```
+
+**Default**: 5000ms (5 seconds)
+
+<Tip>
+  For production deployments, consider increasing the interval to reduce network overhead. For development with frequently changing backends, keep it at 5 seconds or lower.
+</Tip>
+
+### Request timeout
+
+Each health check request has a 3-second timeout, enforced via `AbortController`. This is currently hardcoded in `src/healthchecker/healthChecker.ts:22`:
+
+```typescript src/healthchecker/healthChecker.ts
+const controller = new AbortController();
+const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+const res = await fetch(backend.url, { signal: controller.signal });
+clearTimeout(timeoutId);
+```
+
+To modify the timeout, change the `3000` value to your desired timeout in milliseconds.
+
+## Port configuration
+
+The load balancer listens on port 3000 by default. To change this, modify the `PORT` constant:
+
+```typescript src/index.ts
+const PORT = 3000;
+app.listen(PORT, () => {
+    Logger.info(`Load balancer running on port ${PORT}`);
+    Logger.info(`Backend servers: ${backendUrls.join(", ")}`);
+});
+```
+
+<CodeGroup>
+```typescript Default (port 3000)
+const PORT = 3000;
+app.listen(PORT, () => {
+    Logger.info(`Load balancer running on port ${PORT}`);
+});
+```
+
+```typescript Custom port
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+    Logger.info(`Load balancer running on port ${PORT}`);
+});
+```
+</CodeGroup>
+
+## Load balancing strategy
+
+The load balancing algorithm is configured via the Strategy Pattern. Currently, only Round Robin is implemented:
+
+```typescript src/index.ts
+const strategy = new RoundRobin();
+const loadBalancer = new LoadBalancer(backendPool, strategy);
+```
+
+To implement a different strategy (Least Connections, Weighted Round Robin, IP Hash), create a new strategy class and inject it into the `LoadBalancer` constructor.
+
+## Future: Configuration file support
+
+Configuration file support is planned for a future release. The proposed format:
+
+```yaml config.yaml
+server:
+  port: 3000
+
+backends:
+  - url: http://localhost:3001
+  - url: http://localhost:3002
+  - url: http://localhost:3003
+
+healthCheck:
+  interval: 5000
+  timeout: 3000
+
+strategy: round-robin
+```
+
+This feature is tracked in the project roadmap under "Possible Extensions".

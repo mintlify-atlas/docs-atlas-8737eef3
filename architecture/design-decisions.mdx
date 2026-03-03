@@ -1,0 +1,303 @@
+---
+title: Design decisions
+description: Key architectural choices and the reasoning behind them
+---
+
+This page explains the major design decisions that shaped the load balancer's architecture. Each decision was made to optimize for maintainability, extensibility, performance, or fault tolerance.
+
+## Strategy pattern for load balancing
+
+### The decision
+
+The load balancing algorithm is **decoupled** from the core `LoadBalancer` class using the strategy pattern. The `LoadBalancer` accepts any strategy that implements a `pick()` method.
+
+### Why this matters
+
+This design makes it trivial to add new load balancing algorithms without modifying existing code. Want to add Least Connections, Weighted Round Robin, or IP Hash? Just create a new strategy class and inject it.
+
+### Implementation
+
+<Tabs>
+  <Tab title="LoadBalancer (strategy consumer)">
+    ```typescript
+    // src/balancer/loadBalancer.ts
+    export class LoadBalancer {
+      constructor (
+        private backendPool: BackendPool,
+        private strategy: RoundRobin  // Can be any strategy
+      ){}
+
+      pickBackend(): Backend {
+        const healthyBackends = this.backendPool.getHealthyBackends();
+        return this.strategy.pick(healthyBackends)  // Delegates to strategy
+      }
+    }
+    ```
+  </Tab>
+  
+  <Tab title="RoundRobin (strategy implementation)">
+    ```typescript
+    // src/balancer/roundRobin.ts
+    export class RoundRobin {
+      private index = 0;
+
+      pick(backends: Backend[]): Backend {
+        if (backends.length === 0) {
+          throw new Error(" No backend is available")
+        }
+        const backend = backends[this.index % backends.length]!;
+        this.index++;
+        return backend;
+      }
+    }
+    ```
+  </Tab>
+  
+  <Tab title="Usage">
+    ```typescript
+    // src/index.ts
+    const backendPool = new BackendPool(backendUrls);
+    const strategy = new RoundRobin();  // Can swap with any strategy
+    const loadBalancer = new LoadBalancer(backendPool, strategy);
+    ```
+  </Tab>
+</Tabs>
+
+### Benefits
+
+<Accordion title="Extensibility">
+  Adding a new algorithm requires zero changes to existing code. Just implement a new class with a `pick()` method.
+</Accordion>
+
+<Accordion title="Testability">
+  The `LoadBalancer` can be tested with mock strategies, and each strategy can be unit tested independently.
+</Accordion>
+
+<Accordion title="Single responsibility">
+  The `LoadBalancer` orchestrates components; the strategy implements the algorithm. Each class has one reason to change.
+</Accordion>
+
+<Info>
+  This is a textbook application of the **Open/Closed Principle**: the system is open for extension (new strategies) but closed for modification (no changes to `LoadBalancer`).
+</Info>
+
+---
+
+## Parallel health checks with AbortController timeouts
+
+### The decision
+
+Health checks for all backends run **concurrently** using `Promise.all()`, and each individual check has a **3-second timeout** enforced by `AbortController`.
+
+### Why this matters
+
+Without parallelization, a single slow backend would block health checks for all other backends. Without timeouts, a dead backend could hang indefinitely.
+
+### Implementation
+
+```typescript
+// src/healthchecker/healthChecker.ts:15-42
+async checkAll() {
+  const backends = this.backendPool.getAllBackends();
+
+  // Launch all health checks in parallel
+  const checks = backends.map(async (backend) => {
+    try {
+      // Create timeout controller
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+      // Health check with timeout
+      const res = await fetch(backend.url, { signal: controller.signal });
+      clearTimeout(timeoutId);
+
+      if (res.ok) {
+        this.backendPool.markHealthy(backend.url);
+        Logger.health(backend.url, true, `status: ${res.status}`);
+      } else {
+        this.backendPool.markUnhealthy(backend.url);
+        Logger.health(backend.url, false, `status: ${res.status}`);
+      }
+    } catch (err) {
+      this.backendPool.markUnhealthy(backend.url);
+      const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+      Logger.health(backend.url, false, errorMsg);
+    }
+  });
+
+  // Wait for all checks to complete
+  await Promise.all(checks);
+}
+```
+
+### Performance comparison
+
+<Tabs>
+  <Tab title="Sequential (bad)">
+    With 3 backends:
+    - Backend 1: 2s
+    - Backend 2: 5s (timeout)
+    - Backend 3: 1s
+    
+    **Total time**: 2s + 5s + 1s = **8 seconds** 🐢
+  </Tab>
+  
+  <Tab title="Parallel (good)">
+    With 3 backends:
+    - Backend 1: 2s
+    - Backend 2: 5s (timeout)
+    - Backend 3: 1s
+    
+    **Total time**: max(2s, 5s, 1s) = **5 seconds** 🚀
+    
+    With 3-second timeouts:
+    **Total time**: max(2s, 3s, 1s) = **3 seconds** ⚡
+  </Tab>
+</Tabs>
+
+### Benefits
+
+<Note>
+  Parallel health checks with timeouts ensure that health evaluation completes quickly and predictably, even when backends are slow or unresponsive.
+</Note>
+
+---
+
+## Automatic failover mechanism
+
+### The decision
+
+When a backend fails during request proxying, it is **immediately marked unhealthy** and removed from the rotation. No manual intervention is needed.
+
+### Why this matters
+
+This prevents cascading failures. Without immediate failover, the load balancer would continue sending traffic to a dead backend, causing more 502 errors.
+
+### Implementation
+
+Failover happens in two places:
+
+<Accordion title="1. During proxy error">
+  ```typescript
+  // src/proxy/proxyHandler.ts:31-37
+  proxyErrorHandler: (err, res, next) => {
+    const duration = Date.now() - startTime;
+    Logger.error(`Backend failed after ${duration}ms`, backend.url);
+
+    // Immediate failover: mark unhealthy
+    backendPool.markUnhealthy(backend.url);
+
+    res.status(502).send("Bad gateway");
+  }
+  ```
+  
+  The next request will **not** see this backend in the healthy pool.
+</Accordion>
+
+<Accordion title="2. During health checks">
+  ```typescript
+  // src/healthchecker/healthChecker.ts:35-38
+  catch (err) {
+    this.backendPool.markUnhealthy(backend.url);
+    const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+    Logger.health(backend.url, false, errorMsg);
+  }
+  ```
+  
+  Even if a backend becomes unhealthy between health checks, it won't stay in rotation long.
+</Accordion>
+
+### Recovery mechanism
+
+Once the `HealthChecker` confirms a backend is responding successfully, it's automatically re-added:
+
+```typescript
+// src/healthchecker/healthChecker.ts:27-29
+if (res.ok) {
+  this.backendPool.markHealthy(backend.url);
+  Logger.health(backend.url, true, `status: ${res.status}`);
+}
+```
+
+### Benefits
+
+<Info>
+  This design achieves **self-healing infrastructure**: the system automatically adapts to backend failures and recoveries without operator intervention.
+</Info>
+
+---
+
+## Separation of concerns
+
+### The decision
+
+Each module has a **single responsibility** and a clear interface. No module knows about the implementation details of other modules.
+
+### Why this matters
+
+This makes the codebase:
+- **Easier to understand**: Each file has a clear purpose
+- **Easier to test**: Each module can be tested in isolation
+- **Easier to extend**: Changes to one module rarely affect others
+
+### Module responsibilities
+
+| Module | Single Responsibility | What it does NOT do |
+|--------|----------------------|---------------------|
+| `BackendPool` | Manages backend registry and health state | Does not know about routing algorithms or health checking logic |
+| `RoundRobin` | Implements the routing algorithm | Does not know about health checking or proxying |
+| `LoadBalancer` | Orchestrates strategy + pool to pick a backend | Does not implement algorithms or manage state |
+| `ProxyHandler` | Forwards requests and handles proxy errors | Does not implement load balancing or health checking |
+| `HealthChecker` | Periodically verifies backend availability | Does not know about request routing or proxying |
+| `Logger` | Structured, categorized log output | Does not make decisions or change system state |
+
+### Dependency flow
+
+```typescript
+// src/index.ts - Dependency injection at the entry point
+const backendPool = new BackendPool(backendUrls);
+const strategy = new RoundRobin();
+const loadBalancer = new LoadBalancer(backendPool, strategy);
+const healthChecker = new HealthChecker(backendPool, 5000);
+
+app.use("/", ProxyHandler(loadBalancer, backendPool))
+```
+
+Notice how:
+- Dependencies are **injected** (not created inside modules)
+- Each module receives **only what it needs**
+- The composition happens at the **top level** (index.ts)
+
+### Benefits
+
+<Tabs>
+  <Tab title="Testability">
+    You can test `LoadBalancer` with a mock `BackendPool` and mock strategy. You can test `HealthChecker` with a mock `BackendPool`. Each module can be unit tested independently.
+  </Tab>
+  
+  <Tab title="Maintainability">
+    When you need to change how health checking works, you only touch `HealthChecker`. When you add a new algorithm, you only create a new strategy class.
+  </Tab>
+  
+  <Tab title="Reusability">
+    The `BackendPool` could be reused in a different load balancer. The `RoundRobin` strategy could be used for non-HTTP load balancing.
+  </Tab>
+</Tabs>
+
+<Note>
+  This architecture follows the **SOLID principles**, particularly the Single Responsibility Principle and Dependency Inversion Principle.
+</Note>
+
+---
+
+## Summary
+
+These design decisions work together to create a system that is:
+
+- **Extensible**: Add new features without modifying existing code
+- **Resilient**: Automatically handles failures and recoveries
+- **Observable**: Structured logging for debugging and monitoring
+- **Testable**: Each component can be tested independently
+- **Maintainable**: Clear responsibilities and minimal coupling
+
+The result is a load balancer that not only works well today, but can evolve to meet future requirements with minimal friction.

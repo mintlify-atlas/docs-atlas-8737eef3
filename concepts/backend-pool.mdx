@@ -1,0 +1,168 @@
+---
+title: Backend pool
+description: Learn how the load balancer manages backend servers and tracks their health state
+---
+
+## What is a backend pool?
+
+The backend pool is a collection of servers that can handle incoming requests. The `BackendPool` class maintains the list of backends and their current health status.
+
+<Info>
+Each backend consists of a URL and a health flag indicating whether it's available to receive traffic.
+</Info>
+
+## Backend structure
+
+Backends are represented as simple objects with two properties:
+
+```typescript src/types/types.ts
+export interface Backend {
+    url: string,
+    health: boolean
+}
+```
+
+- `url` - The backend server endpoint (e.g., `http://localhost:3001`)
+- `health` - Boolean flag indicating if the server is operational
+
+## BackendPool implementation
+
+The `BackendPool` class manages the collection of backends:
+
+```typescript src/balancer/pool.ts
+import { type Backend } from "../types/types.ts"
+
+export class BackendPool {
+    private backends: Backend[];
+
+    constructor(urls: string[]){
+        this.backends = urls.map((url: string) => ({
+            url, health:true
+        }))
+    }
+
+    getAllBackends(): Backend[] {
+        return this.backends;
+    }
+    
+    getHealthyBackends() : Backend[] {
+        return this.backends.filter(backend => backend.health);
+    }
+
+    markUnhealthy(url: string): void {
+        const backend = this.backends.find(b => b.url === url);
+        if(backend){
+            backend.health = false
+        }
+    }
+
+    markHealthy(url: string): void {
+        const backend  = this.backends.find(b => b.url === url);
+        if(backend){
+            backend.health = true
+        }
+    }
+}
+```
+
+## Key methods
+
+### getAllBackends()
+
+Returns all backends regardless of health status. This is used by the health checker to monitor all servers, including those currently marked as unhealthy.
+
+```typescript
+const allBackends = backendPool.getAllBackends();
+// Returns: [{url: "http://localhost:3001", health: true}, ...]
+```
+
+<Note>
+The health checker needs to poll all backends, not just healthy ones, so it can detect when failed servers recover.
+</Note>
+
+### getHealthyBackends()
+
+Returns only backends with `health: true`. This is the critical method used by the load balancer when selecting a server to handle a request.
+
+```typescript
+const healthyBackends = backendPool.getHealthyBackends();
+// Returns: Only backends where health === true
+```
+
+<Warning>
+If all backends are unhealthy, `getHealthyBackends()` returns an empty array. The routing strategy will throw an error when trying to pick from an empty list.
+</Warning>
+
+### markHealthy(url)
+
+Marks a specific backend as healthy. Called by the health checker when a server passes its health check:
+
+```typescript
+backendPool.markHealthy("http://localhost:3001");
+```
+
+The backend is immediately available for load balancing in the next request cycle.
+
+### markUnhealthy(url)
+
+Marks a specific backend as unhealthy. Called by the health checker when a server fails its health check:
+
+```typescript
+backendPool.markUnhealthy("http://localhost:3001");
+```
+
+The backend is immediately excluded from load balancing until it recovers.
+
+## Initialization
+
+When the backend pool is created, all servers start as healthy:
+
+```typescript
+const pool = new BackendPool([
+    "http://localhost:3001",
+    "http://localhost:3002",
+    "http://localhost:3003"
+]);
+```
+
+<Tip>
+Backends are assumed healthy on startup. The first health check will verify this and update their status accordingly.
+</Tip>
+
+## Health state tracking
+
+The backend pool maintains mutable state for each server. When health checks run:
+
+<Steps>
+  <Step title="Health checker polls all backends">
+    `getAllBackends()` returns the full list of servers to check.
+  </Step>
+  
+  <Step title="Health status updated">
+    Based on the check results, `markHealthy()` or `markUnhealthy()` is called for each backend.
+  </Step>
+  
+  <Step title="Load balancer queries healthy servers">
+    `getHealthyBackends()` filters the list to only include available servers.
+  </Step>
+  
+  <Step title="Request routed">
+    The routing strategy picks from the healthy backends.
+  </Step>
+</Steps>
+
+<Info>
+The backend pool acts as the single source of truth for server health status. Both the health checker and load balancer reference the same pool instance.
+</Info>
+
+## Thread safety considerations
+
+The current implementation assumes single-threaded JavaScript execution. In the Node.js event loop:
+
+- Health checks update backend health asynchronously
+- Load balancing queries happen synchronously
+- No race conditions occur due to JavaScript's single-threaded nature
+
+<Note>
+If you port this to a multi-threaded environment, you'll need to add synchronization around health state updates.
+</Note>

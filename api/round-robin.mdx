@@ -1,0 +1,124 @@
+---
+title: RoundRobin
+description: Load balancing strategy class that distributes requests evenly across backend servers using the round-robin algorithm
+---
+
+## Overview
+
+The `RoundRobin` class implements a round-robin load balancing strategy, which distributes incoming requests sequentially across available backend servers. This ensures even distribution of traffic and prevents any single backend from being overwhelmed.
+
+## How it works
+
+The round-robin algorithm maintains an internal index that tracks which backend server should receive the next request. Each time a backend is selected:
+
+1. The current index is used to select a backend from the list (using modulo to wrap around)
+2. The index is incremented for the next selection
+3. When the index reaches the end of the list, it wraps back to the beginning
+
+This creates a circular rotation through all available backends, ensuring equal distribution over time.
+
+## Constructor
+
+```typescript
+const roundRobin = new RoundRobin();
+```
+
+The constructor initializes the internal index to `0`. No parameters are required.
+
+## Methods
+
+### pick
+
+Selects the next backend server using the round-robin algorithm.
+
+```typescript
+pick(backends: Backend[]): Backend
+```
+
+<ParamField path="backends" type="Backend[]" required>
+  Array of backend servers to select from. Each backend must conform to the `Backend` interface.
+</ParamField>
+
+**Returns**: `Backend` - The selected backend server
+
+**Throws**: `Error` - If the backends array is empty ("No backend is available")
+
+#### Implementation logic
+
+```typescript
+pick(backends: Backend[]): Backend { 
+    if (backends.length === 0){
+        throw new Error(" No backend is available")
+    }
+
+    const backend = backends[this.index % backends.length]!;
+    this.index++;
+
+    return backend;
+}
+```
+
+The method uses the modulo operator (`%`) to ensure the index wraps around when it exceeds the array length, creating the circular behavior.
+
+## Usage examples
+
+### Basic usage
+
+```typescript
+import { RoundRobin } from './balancer/roundRobin';
+import type { Backend } from './types/types';
+
+const balancer = new RoundRobin();
+
+const backends: Backend[] = [
+  { url: 'http://localhost:3001', health: true },
+  { url: 'http://localhost:3002', health: true },
+  { url: 'http://localhost:3003', health: true }
+];
+
+// First request goes to localhost:3001
+const backend1 = balancer.pick(backends);
+
+// Second request goes to localhost:3002
+const backend2 = balancer.pick(backends);
+
+// Third request goes to localhost:3003
+const backend3 = balancer.pick(backends);
+
+// Fourth request wraps back to localhost:3001
+const backend4 = balancer.pick(backends);
+```
+
+### Handling empty backend lists
+
+```typescript
+import { RoundRobin } from './balancer/roundRobin';
+
+const balancer = new RoundRobin();
+const emptyBackends = [];
+
+try {
+  const backend = balancer.pick(emptyBackends);
+} catch (error) {
+  console.error(error.message); // " No backend is available"
+}
+```
+
+### Integration with health checks
+
+```typescript
+import { RoundRobin } from './balancer/roundRobin';
+import type { Backend } from './types/types';
+
+const balancer = new RoundRobin();
+
+const allBackends: Backend[] = [
+  { url: 'http://localhost:3001', health: true },
+  { url: 'http://localhost:3002', health: false },  // Unhealthy
+  { url: 'http://localhost:3003', health: true }
+];
+
+// Filter to only healthy backends before picking
+const healthyBackends = allBackends.filter(b => b.health);
+const selectedBackend = balancer.pick(healthyBackends);
+```

@@ -1,0 +1,138 @@
+---
+title: Types
+description: Core TypeScript interfaces and type definitions for the HTTP Load Balancer
+---
+
+## Overview
+
+This module defines the core type definitions used throughout the HTTP Load Balancer project. These types ensure type safety and provide clear contracts for data structures.
+
+## Backend interface
+
+The `Backend` interface represents a backend server in the load balancer pool.
+
+```typescript
+export interface Backend {
+    url: string,
+    health: boolean
+}
+```
+
+### Fields
+
+<ParamField path="url" type="string" required>
+  The full URL of the backend server, including protocol and port (e.g., "http://localhost:3001")
+</ParamField>
+
+<ParamField path="health" type="boolean" required>
+  The health status of the backend server. `true` indicates the server is healthy and can receive requests, `false` indicates the server is unhealthy and should be excluded from load balancing
+</ParamField>
+
+## Usage examples
+
+### Defining backend servers
+
+```typescript
+import type { Backend } from './types/types';
+
+const backend1: Backend = {
+  url: 'http://localhost:3001',
+  health: true
+};
+
+const backend2: Backend = {
+  url: 'http://localhost:3002',
+  health: false  // This backend is unhealthy
+};
+
+const backends: Backend[] = [backend1, backend2];
+```
+
+### Using with the RoundRobin balancer
+
+```typescript
+import { RoundRobin } from './balancer/roundRobin';
+import type { Backend } from './types/types';
+
+const balancer = new RoundRobin();
+
+const backends: Backend[] = [
+  { url: 'http://localhost:3001', health: true },
+  { url: 'http://localhost:3002', health: true },
+  { url: 'http://localhost:3003', health: true }
+];
+
+const selectedBackend: Backend = balancer.pick(backends);
+console.log(selectedBackend.url);  // e.g., "http://localhost:3001"
+```
+
+### Filtering healthy backends
+
+```typescript
+import type { Backend } from './types/types';
+
+const allBackends: Backend[] = [
+  { url: 'http://localhost:3001', health: true },
+  { url: 'http://localhost:3002', health: false },
+  { url: 'http://localhost:3003', health: true },
+  { url: 'http://localhost:3004', health: false }
+];
+
+// Get only healthy backends for load balancing
+const healthyBackends: Backend[] = allBackends.filter(
+  (backend: Backend) => backend.health
+);
+
+console.log(healthyBackends.length);  // 2
+```
+
+### Updating backend health status
+
+```typescript
+import type { Backend } from './types/types';
+
+const backends: Backend[] = [
+  { url: 'http://localhost:3001', health: true },
+  { url: 'http://localhost:3002', health: true },
+  { url: 'http://localhost:3003', health: true }
+];
+
+// Mark a backend as unhealthy
+function markUnhealthy(backends: Backend[], url: string): void {
+  const backend = backends.find(b => b.url === url);
+  if (backend) {
+    backend.health = false;
+  }
+}
+
+markUnhealthy(backends, 'http://localhost:3002');
+
+console.log(backends[1].health);  // false
+```
+
+### Type-safe backend configuration
+
+```typescript
+import type { Backend } from './types/types';
+
+interface LoadBalancerConfig {
+  backends: Backend[];
+  port: number;
+  healthCheckInterval: number;
+}
+
+const config: LoadBalancerConfig = {
+  backends: [
+    { url: 'http://localhost:3001', health: true },
+    { url: 'http://localhost:3002', health: true }
+  ],
+  port: 8080,
+  healthCheckInterval: 5000
+};
+
+function initializeLoadBalancer(config: LoadBalancerConfig): void {
+  config.backends.forEach((backend: Backend) => {
+    console.log(`Registering backend: ${backend.url}`);
+  });
+}
+```

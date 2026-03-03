@@ -1,0 +1,128 @@
+---
+title: Introduction
+description: A production-ready Layer 7 HTTP load balancer built from scratch in TypeScript with automatic health checking and intelligent failover
+---
+
+## What is this load balancer?
+
+This is a **Layer 7 HTTP Load Balancer** built from first principles in TypeScript using the Bun runtime. It distributes incoming HTTP traffic across multiple backend servers with automatic health monitoring, intelligent failover handling, and structured request logging.
+
+Unlike simple reverse proxies, this load balancer actively monitors backend health, automatically removes failing servers from rotation, and brings them back once they recover—all without manual intervention.
+
+<Info>
+**Why this project exists**: To deeply understand how production load balancers like NGINX and HAProxy work under the hood by implementing request routing, health monitoring, and fault tolerance from scratch.
+</Info>
+
+## Key features
+
+This load balancer implements essential production features:
+
+<CardGroup cols={2}>
+  <Card title="Round-robin distribution" icon="arrows-rotate">
+    Distributes requests evenly across healthy backend servers using a round-robin algorithm
+  </Card>
+  
+  <Card title="Automatic health checks" icon="heart-pulse">
+    Monitors backend availability every 5 seconds with configurable timeout handling
+  </Card>
+  
+  <Card title="Intelligent failover" icon="shield-halved">
+    Automatically removes failing backends and restores them when they recover
+  </Card>
+  
+  <Card title="Structured logging" icon="list">
+    Color-coded logs for requests, responses, health checks, and errors with timing metrics
+  </Card>
+</CardGroup>
+
+### Architecture highlights
+
+**Strategy pattern for load balancing** — The load balancing algorithm is decoupled from the core balancer via a strategy interface. Currently implements round-robin, but the architecture makes it trivial to add least connections, weighted round-robin, or IP hash.
+
+**Parallel health checks** — Health checks run concurrently using `Promise.all()` with per-request `AbortController` timeouts (3s). This prevents a single slow or dead backend from blocking health evaluation of the entire pool.
+
+**Clean separation of concerns** — Each module has a single responsibility:
+
+| Component | Responsibility |
+|-----------|----------------|
+| `BackendPool` | Manages backend server registry and health state |
+| `RoundRobin` | Implements the routing algorithm |
+| `LoadBalancer` | Orchestrates strategy + pool to pick a backend |
+| `ProxyHandler` | Forwards requests and handles proxy errors |
+| `HealthChecker` | Periodically verifies backend availability |
+| `Logger` | Structured, categorized log output |
+
+## How it works
+
+The request flow follows this sequence:
+
+<Steps>
+  <Step title="Startup">
+    The load balancer initializes a pool of backend servers and starts periodic health checks every 5 seconds
+  </Step>
+  
+  <Step title="Incoming request">
+    Express receives a request and passes it to the proxy handler middleware
+  </Step>
+  
+  <Step title="Backend selection">
+    The load balancer queries the backend pool for healthy servers and uses the round-robin strategy to pick the next one
+  </Step>
+  
+  <Step title="Proxying">
+    The request is forwarded to the selected backend via express-http-proxy. Response time is measured and logged
+  </Step>
+  
+  <Step title="Error handling">
+    If the backend fails, it's marked unhealthy immediately and a 502 Bad Gateway is returned. If no backends are available, a 503 Service Unavailable is returned
+  </Step>
+  
+  <Step title="Health recovery">
+    The health checker runs every 5 seconds, pinging each backend. Recovered servers are automatically re-added to the healthy pool
+  </Step>
+</Steps>
+
+## Use cases
+
+<CardGroup cols={2}>
+  <Card title="Learning resource" icon="book">
+    Study how production load balancers work by exploring clean, well-structured TypeScript code with clear separation of concerns
+  </Card>
+  
+  <Card title="Development environment" icon="code">
+    Use as a local load balancer for testing microservices or distributed applications during development
+  </Card>
+  
+  <Card title="Foundation for custom solutions" icon="layer-group">
+    Extend with additional algorithms (least connections, IP hash), rate limiting, or admin dashboards for your specific needs
+  </Card>
+  
+  <Card title="Interview preparation" icon="graduation-cap">
+    Understand load balancer internals, health checking strategies, and the strategy pattern in practice
+  </Card>
+</CardGroup>
+
+## Tech stack
+
+| Technology | Purpose |
+|------------|----------|
+| **TypeScript** | Type-safe development with strict mode |
+| **Bun** | Fast JavaScript runtime and package manager |
+| **Express 5** | HTTP server framework |
+| **express-http-proxy** | Reverse proxy middleware |
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get up and running in 5 minutes
+  </Card>
+  
+  <Card title="Installation" icon="download" href="/installation">
+    Detailed setup and prerequisites
+  </Card>
+  
+  <Card title="Architecture" icon="diagram-project" href="/architecture/overview">
+    Deep dive into system design
+  </Card>
+</CardGroup>

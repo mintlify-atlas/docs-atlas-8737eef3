@@ -1,0 +1,185 @@
+---
+title: Monitoring
+description: Monitor load balancer operations through structured logging and health status tracking
+---
+
+## Overview
+
+The HTTP Load Balancer uses structured logging to provide visibility into all operations. The `Logger` class (`src/utils/logger.ts`) categorizes log output into five types: REQUEST, RESPONSE, HEALTH, ERROR, and INFO.
+
+## Log categories
+
+### REQUEST logs
+
+Logs every incoming request and which backend server it's routed to.
+
+**Format**: `REQUEST: {method} {path} -> {backendUrl}`
+
+```typescript src/utils/logger.ts
+static request(method: string, path: string, backendUrl: string): void {
+  console.log(`REQUEST: ${method} ${path} -> ${backendUrl}`);
+}
+```
+
+**Example output**:
+```
+REQUEST: GET / -> http://localhost:3001
+REQUEST: POST /api/users -> http://localhost:3002
+REQUEST: GET /health -> http://localhost:3003
+```
+
+<Info>
+  Request logs are emitted in `src/proxy/proxyHandler.ts:23` immediately after a backend is selected.
+</Info>
+
+### RESPONSE logs
+
+Logs the response from the backend including status code and response time.
+
+**Format**: `RESPONSE: {method} {path} <- {backendUrl} [{statusCode}] {duration}ms`
+
+```typescript src/utils/logger.ts
+static response(method: string, path: string, backendUrl: string, statusCode: number, duration: number): void {
+  console.log(`RESPONSE: ${method} ${path} <- ${backendUrl} [${statusCode}] ${duration}ms`);
+}
+```
+
+**Example output**:
+```
+RESPONSE: GET / <- http://localhost:3001 [200] 12ms
+RESPONSE: POST /api/users <- http://localhost:3002 [201] 45ms
+RESPONSE: GET /health <- http://localhost:3003 [200] 8ms
+```
+
+<Tip>
+  Use response duration metrics to identify slow backends. Consistently high response times may indicate backend performance issues.
+</Tip>
+
+### HEALTH logs
+
+Logs the health status of each backend server during periodic health checks.
+
+**Format**: `HEALTH: {status} {url}{extraInfo}`
+
+```typescript src/utils/logger.ts
+static health(url: string, isHealthy: boolean, details?: string): void {
+  const status = isHealthy ? 'HEALTHY' : 'UNHEALTHY';
+  const extraInfo = details ? ` - ${details}` : '';
+  console.log(`HEALTH: ${status} ${url}${extraInfo}`);
+}
+```
+
+**Example output**:
+```
+HEALTH: HEALTHY http://localhost:3001 - status: 200
+HEALTH: HEALTHY http://localhost:3002 - status: 200
+HEALTH: UNHEALTHY http://localhost:3003 - Connection refused
+HEALTH: UNHEALTHY http://localhost:3004 - status: 500
+```
+
+### ERROR logs
+
+Logs error conditions including proxy failures and missing backends.
+
+**Format**: `ERROR: {message}{backend}`
+
+```typescript src/utils/logger.ts
+static error(message: string, backendUrl?: string): void {
+  const backend = backendUrl ? ` (${backendUrl})` : '';
+  console.error(`ERROR: ${message}${backend}`);
+}
+```
+
+**Example output**:
+```
+ERROR: No healthy backends available
+ERROR: Backend failed after 2034ms (http://localhost:3002)
+```
+
+<Warning>
+  ERROR logs indicate service degradation. "No healthy backends available" means the load balancer cannot serve any requests.
+</Warning>
+
+### INFO logs
+
+Logs general informational messages about load balancer state and operations.
+
+**Format**: `INFO: {message}`
+
+```typescript src/utils/logger.ts
+static info(message: string): void {
+  console.log(`INFO: ${message}`);
+}
+```
+
+**Example output**:
+```
+INFO: Load balancer running on port 3000
+INFO: Backend servers: http://localhost:3001, http://localhost:3002, http://localhost:3003
+INFO: Health checker started (checking every 5s)
+```
+
+## Sample log output
+
+Here's a complete log sequence showing startup, health checks, and request handling:
+
+```
+INFO: Load balancer running on port 3000
+INFO: Backend servers: http://localhost:3001, http://localhost:3002, http://localhost:3003
+INFO: Health checker started (checking every 5s)
+HEALTH: HEALTHY http://localhost:3001 - status: 200
+HEALTH: HEALTHY http://localhost:3002 - status: 200
+HEALTH: UNHEALTHY http://localhost:3003 - Connection refused
+REQUEST: GET / -> http://localhost:3001
+RESPONSE: GET / <- http://localhost:3001 [200] 12ms
+REQUEST: GET / -> http://localhost:3002
+RESPONSE: GET / <- http://localhost:3002 [200] 8ms
+REQUEST: GET / -> http://localhost:3001
+RESPONSE: GET / <- http://localhost:3001 [200] 10ms
+```
+
+## Monitoring backend health
+
+### Health check flow
+
+<Steps>
+  <Step title="Parallel health checks">
+    The health checker queries all backends concurrently using `Promise.all()` every 5 seconds (configurable).
+  </Step>
+
+  <Step title="Timeout enforcement">
+    Each health check request has a 3-second timeout enforced via `AbortController`. Slow backends are marked unhealthy.
+  </Step>
+
+  <Step title="Status evaluation">
+    Backends returning HTTP 2xx status codes are marked healthy. All other responses (4xx, 5xx) or connection failures mark the backend as unhealthy.
+  </Step>
+
+  <Step title="Automatic recovery">
+    Once a previously unhealthy backend starts responding successfully, it's automatically re-added to the healthy pool.
+  </Step>
+</Steps>
+
+### Tracking backend status
+
+You can monitor backend health by watching HEALTH log lines:
+
+- **HEALTHY** with status code → Backend is operational
+- **UNHEALTHY** with error message → Backend is down or misconfigured
+- **UNHEALTHY** with non-2xx status → Backend is reachable but returning errors
+
+## Log aggregation
+
+<Info>
+  All logs are written to stdout/stderr. For production deployments, pipe logs to a log aggregation service like Datadog, Splunk, or the ELK stack.
+</Info>
+
+Example with Docker:
+```bash
+docker logs -f <container-id> | tee loadbalancer.log
+```
+
+Example with systemd:
+```bash
+journalctl -u loadbalancer -f
+```

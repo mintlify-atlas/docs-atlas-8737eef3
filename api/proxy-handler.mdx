@@ -1,0 +1,269 @@
+---
+title: ProxyHandler
+description: Express middleware factory that proxies incoming requests to selected backend servers with error handling and response time logging
+---
+
+## Overview
+
+The `ProxyHandler` function creates an Express middleware that handles the actual proxying of HTTP requests to backend servers. It integrates with the load balancer to select backends, forwards requests, handles failures, and logs request/response metrics.
+
+## Function signature
+
+Creates an Express middleware function that proxies requests to backend servers.
+
+```typescript
+function ProxyHandler(
+  loadBalancer: LoadBalancer,
+  backendPool: BackendPool
+): (req: Request, res: Response, next: NextFunction) => Promise<void>
+```
+
+### Parameters
+
+<ParamField path="loadBalancer" type="LoadBalancer" required>
+  The load balancer instance used to select which backend server should handle each request.
+</ParamField>
+
+<ParamField path="backendPool" type="BackendPool" required>
+  The backend pool instance used to mark backends as unhealthy when proxy errors occur.
+</ParamField>
+
+### Return value
+
+**Returns:** Express middleware function `(req: Request, res: Response, next: NextFunction) => Promise<void>`
+
+The returned middleware can be used with `app.use()` to handle all incoming requests.
+
+## Error handling
+
+The proxy handler implements comprehensive error handling for different failure scenarios:
+
+### 503 Service Unavailable
+
+Returned when no healthy backends are available.
+
+```typescript
+try {
+  backend = loadBalancer.pickBackend();
+} catch (err) {
+  Logger.error("No healthy backends available");
+  res.status(503).send("No healthy backends available");
+  return;
+}
+```
+
+**Triggers when:**
+- All backends are marked unhealthy
+- Backend pool is empty
+- Load balancer cannot select a backend
+
+### 502 Bad Gateway
+
+Returned when the selected backend fails to respond or connection fails.
+
+```typescript
+proxyErrorHandler: (err, res, next) => {
+  const duration = Date.now() - startTime;
+  Logger.error(`Backend failed after ${duration}ms`, backend.url);
+  backendPool.markUnhealthy(backend.url);
+  res.status(502).send("Bad gateway");
+}
+```
+
+**Triggers when:**
+- Backend server is unreachable
+- Connection timeout
+- Backend returns invalid response
+- Network error during request forwarding
+
+**Automatic mitigation:**
+- Failed backend is immediately marked as unhealthy
+- Future requests will not be routed to the failed backend
+- Health checker will eventually restore the backend if it recovers
+
+## Response time logging
+
+The proxy handler tracks and logs response times for observability:
+
+```typescript
+const startTime = Date.now();
+
+// ... proxy request ...
+
+userResDecorator: (proxyRes, proxyResData, userReq, userRes) => {
+  const duration = Date.now() - startTime;
+  Logger.response(req.method, req.path, backend.url, proxyRes.statusCode || 0, duration);
+  return proxyResData;
+}
+```
+
+**Logged information:**
+- HTTP method (GET, POST, etc.)
+- Request path
+- Selected backend URL
+- Response status code
+- Request duration in milliseconds
+
+## Usage examples
+
+### Basic setup
+
+```typescript
+import express from 'express';
+import { ProxyHandler } from './proxy/proxyHandler';
+import { LoadBalancer } from './balancer/loadBalancer';
+import { BackendPool } from './balancer/pool';
+import { RoundRobin } from './balancer/roundRobin';
+
+const app = express();
+
+// Setup backend pool and load balancer
+const pool = new BackendPool([
+  'http://localhost:3001',
+  'http://localhost:3002',
+  'http://localhost:3003'
+]);
+
+const strategy = new RoundRobin();
+const loadBalancer = new LoadBalancer(pool, strategy);
+
+// Apply proxy handler to all routes
+app.use('*', ProxyHandler(loadBalancer, pool));
+
+app.listen(8080);
+```
+
+### Path-specific proxying
+
+```typescript
+// Proxy only API routes
+app.use('/api/*', ProxyHandler(loadBalancer, pool));
+
+// Serve static files directly
+app.use(express.static('public'));
+```
+
+### Multiple backend pools
+
+```typescript
+// Different backend pools for different services
+const apiPool = new BackendPool([
+  'http://api1:3000',
+  'http://api2:3000'
+]);
+
+const webPool = new BackendPool([
+  'http://web1:8080',
+  'http://web2:8080'
+]);
+
+const apiBalancer = new LoadBalancer(apiPool, new RoundRobin());
+const webBalancer = new LoadBalancer(webPool, new RoundRobin());
+
+// Route to different backend pools based on path
+app.use('/api/*', ProxyHandler(apiBalancer, apiPool));
+app.use('*', ProxyHandler(webBalancer, webPool));
+```
+
+### With custom middleware
+
+```typescript
+import { rateLimit } from 'express-rate-limit';
+import cors from 'cors';
+
+// Apply middleware before proxy
+app.use(cors());
+app.use(express.json());
+
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100 // limit each IP to 100 requests per windowMs
+});
+
+app.use(limiter);
+
+// Then proxy requests
+app.use('*', ProxyHandler(loadBalancer, pool));
+```
+
+### Complete production setup
+
+```typescript
+import express from 'express';
+import { BackendPool } from './balancer/pool';
+import { LoadBalancer } from './balancer/loadBalancer';
+import { RoundRobin } from './balancer/roundRobin';
+import { HealthChecker } from './healthchecker/healthChecker';
+import { ProxyHandler } from './proxy/proxyHandler';
+
+const app = express();
+
+// Backend configuration
+const backends = [
+  'http://backend1.internal:3000',
+  'http://backend2.internal:3000',
+  'http://backend3.internal:3000'
+];
+
+// Initialize components
+const pool = new BackendPool(backends);
+const strategy = new RoundRobin();
+const loadBalancer = new LoadBalancer(pool, strategy);
+const healthChecker = new HealthChecker(pool, 5000);
+
+// Start health monitoring
+healthChecker.start();
+
+// Setup middleware
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Health check endpoint for the load balancer itself
+app.get('/health', (req, res) => {
+  const healthy = pool.getHealthyBackends().length;
+  const total = pool.getAllBackends().length;
+  
+  if (healthy > 0) {
+    res.status(200).json({ status: 'healthy', healthy, total });
+  } else {
+    res.status(503).json({ status: 'unhealthy', healthy, total });
+  }
+});
+
+// Proxy all other requests
+app.use('*', ProxyHandler(loadBalancer, pool));
+
+// Start server
+const PORT = process.env.PORT || 8080;
+const server = app.listen(PORT, () => {
+  console.log(`Load balancer running on port ${PORT}`);
+  console.log(`Monitoring ${backends.length} backends`);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, shutting down gracefully');
+  healthChecker.stop();
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
+});
+```
+
+## Request flow
+
+1. **Backend selection**: Load balancer picks a healthy backend using the configured strategy
+2. **Error check**: If no healthy backends available, return 503
+3. **Request logging**: Log the incoming request method, path, and selected backend
+4. **Proxy setup**: Create proxy middleware with the selected backend URL
+5. **Request forwarding**: Forward the request to the backend server
+6. **Response handling**: 
+   - On success: Log response status and duration, return response to client
+   - On failure: Log error, mark backend as unhealthy, return 502
+
+## Related
+
+- [LoadBalancer](/api/load-balancer) - Selects backends for proxying
+- [BackendPool](/api/backend-pool) - Manages backend health status
+- [HealthChecker](/api/health-checker) - Monitors backend availability

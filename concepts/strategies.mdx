@@ -1,0 +1,239 @@
+---
+title: Strategies
+description: Understand routing strategies and how to implement custom load balancing algorithms
+---
+
+## What is a routing strategy?
+
+A routing strategy determines which backend server should handle the next incoming request. The load balancer uses the strategy pattern to decouple routing logic from the core balancing functionality.
+
+<Info>
+The strategy pattern allows you to swap routing algorithms without modifying the LoadBalancer class.
+</Info>
+
+## Strategy pattern architecture
+
+The `LoadBalancer` depends on a strategy interface to select backends:
+
+```typescript src/balancer/loadBalancer.ts
+export class LoadBalancer {
+    constructor (
+        private backendPool: BackendPool,
+        private strategy: RoundRobin  // Strategy injected via constructor
+    ){}
+
+    pickBackend(): Backend {
+        const healthyBackends = this.backendPool.getHealthyBackends();
+        return this.strategy.pick(healthyBackends)  // Delegates to strategy
+    }
+}
+```
+
+This design enables:
+
+- **Flexibility** - Change routing algorithms at runtime
+- **Extensibility** - Add new strategies without modifying existing code
+- **Testability** - Mock strategies for unit testing
+
+## Round Robin strategy
+
+The current implementation uses Round Robin, which distributes requests evenly across all healthy backends:
+
+```typescript src/balancer/roundRobin.ts
+import { type Backend } from "../types/types.ts"
+
+export class RoundRobin {
+    private index = 0; 
+
+    pick (backends: Backend[]): Backend { 
+        if (backends.length === 0){
+            throw new Error(" No backend is available")
+        }
+
+        const backend = backends[this.index % backends.length]!;
+        this.index++;
+
+        return backend;
+    }
+}
+```
+
+### How Round Robin works
+
+<Steps>
+  <Step title="Initialize index">
+    The strategy maintains an internal counter starting at 0.
+  </Step>
+  
+  <Step title="Calculate position">
+    Uses modulo arithmetic: `this.index % backends.length` ensures the index wraps around when it exceeds the array size.
+  </Step>
+  
+  <Step title="Select backend">
+    Returns the backend at the calculated position.
+  </Step>
+  
+  <Step title="Increment counter">
+    Increments the index so the next call selects the next backend.
+  </Step>
+</Steps>
+
+<Note>
+With 3 backends, requests go to backend 0, then 1, then 2, then back to 0, cycling continuously.
+</Note>
+
+### Error handling
+
+The strategy throws an error if no backends are available:
+
+```typescript
+if (backends.length === 0){
+    throw new Error(" No backend is available")
+}
+```
+
+<Warning>
+This happens when all backends fail health checks. Consider implementing fallback behavior or alerting for production systems.
+</Warning>
+
+## Implementing custom strategies
+
+You can create new routing strategies by following the same pattern. Here are examples:
+
+### Weighted Round Robin
+
+Distribute traffic based on backend capacity:
+
+```typescript
+export interface WeightedBackend extends Backend {
+    weight: number;
+}
+
+export class WeightedRoundRobin {
+    private currentIndex = 0;
+    private currentWeight = 0;
+
+    pick(backends: WeightedBackend[]): Backend {
+        // Implementation: Select backends proportionally to their weight
+        // A backend with weight=3 gets 3x more traffic than weight=1
+    }
+}
+```
+
+<Tip>
+Weighted strategies are useful when backends have different capacities (e.g., some servers have more CPU/RAM).
+</Tip>
+
+### Least Connections
+
+Route to the backend with fewest active connections:
+
+```typescript
+export interface ConnectionBackend extends Backend {
+    activeConnections: number;
+}
+
+export class LeastConnections {
+    pick(backends: ConnectionBackend[]): Backend {
+        return backends.reduce((min, backend) => 
+            backend.activeConnections < min.activeConnections ? backend : min
+        );
+    }
+}
+```
+
+<Note>
+This strategy requires tracking active connections per backend, which isn't in the current implementation.
+</Note>
+
+### IP Hash
+
+Route requests from the same client IP to the same backend (session persistence):
+
+```typescript
+export class IPHash {
+    pick(backends: Backend[], clientIP: string): Backend {
+        const hash = this.hashIP(clientIP);
+        const index = hash % backends.length;
+        return backends[index];
+    }
+
+    private hashIP(ip: string): number {
+        // Simple hash function for demonstration
+        return ip.split('.').reduce((acc, octet) => acc + parseInt(octet), 0);
+    }
+}
+```
+
+<Info>
+IP hash ensures the same client always reaches the same backend, useful for stateful applications.
+</Info>
+
+### Random selection
+
+Simply pick a random backend:
+
+```typescript
+export class Random {
+    pick(backends: Backend[]): Backend {
+        if (backends.length === 0) {
+            throw new Error("No backend is available");
+        }
+        const index = Math.floor(Math.random() * backends.length);
+        return backends[index];
+    }
+}
+```
+
+<Tip>
+Random selection is simple but effective for stateless applications with homogeneous backends.
+</Tip>
+
+## Strategy interface pattern
+
+To make strategies interchangeable, define a common interface:
+
+```typescript
+export interface LoadBalancingStrategy {
+    pick(backends: Backend[]): Backend;
+}
+```
+
+Then update the LoadBalancer to accept any strategy:
+
+```typescript
+export class LoadBalancer {
+    constructor (
+        private backendPool: BackendPool,
+        private strategy: LoadBalancingStrategy  // Interface, not concrete class
+    ){}
+}
+```
+
+All strategies implement the same interface:
+
+```typescript
+export class RoundRobin implements LoadBalancingStrategy { /* ... */ }
+export class Random implements LoadBalancingStrategy { /* ... */ }
+export class LeastConnections implements LoadBalancingStrategy { /* ... */ }
+```
+
+<Note>
+This is a classic strategy pattern implementation - the context (LoadBalancer) delegates to the strategy interface.
+</Note>
+
+## Choosing a strategy
+
+Different strategies suit different use cases:
+
+| Strategy | Best for | Trade-offs |
+|----------|---------|------------|
+| **Round Robin** | Stateless apps, equal backends | Simple but no session persistence |
+| **Weighted** | Mixed backend capacities | Requires capacity planning |
+| **Least Connections** | Long-lived connections | Needs connection tracking |
+| **IP Hash** | Stateful apps needing persistence | Uneven distribution if client IPs skewed |
+| **Random** | Stateless apps, simple setup | No predictability |
+
+<Tip>
+Start with Round Robin for simplicity. Add complexity only when you have a specific requirement like session persistence or unequal backend capacities.
+</Tip>

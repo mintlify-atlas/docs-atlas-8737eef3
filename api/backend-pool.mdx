@@ -1,0 +1,184 @@
+---
+title: BackendPool
+description: Manages the collection of backend servers and tracks their health status for load balancing decisions
+---
+
+## Overview
+
+The `BackendPool` class maintains a collection of backend servers and their health status. It provides methods to query backends, filter by health status, and update health states based on health checks or proxy errors.
+
+## Constructor
+
+Creates a new BackendPool with the specified backend server URLs.
+
+```typescript
+constructor(urls: string[])
+```
+
+<ParamField path="urls" type="string[]" required>
+  Array of backend server URLs to include in the pool. Each URL should be a complete HTTP/HTTPS endpoint (e.g., `http://localhost:3001`).
+</ParamField>
+
+**Behavior:**
+- Each URL is converted to a `Backend` object with initial `health: true` status
+- All backends start in a healthy state by default
+
+## Backend interface
+
+The `Backend` interface represents a single backend server in the pool.
+
+```typescript
+interface Backend {
+  url: string;
+  health: boolean;
+}
+```
+
+<ParamField path="url" type="string">
+  The complete URL of the backend server (e.g., `http://localhost:3001`)
+</ParamField>
+
+<ParamField path="health" type="boolean">
+  Health status of the backend. `true` indicates healthy and available, `false` indicates unhealthy and should not receive traffic.
+</ParamField>
+
+## Methods
+
+### getAllBackends()
+
+Returns all backends in the pool regardless of health status.
+
+```typescript
+getAllBackends(): Backend[]
+```
+
+**Returns:** `Backend[]` - Array of all backend objects in the pool.
+
+**Use case:** Primarily used by the health checker to verify all backends, including those currently marked unhealthy.
+
+### getHealthyBackends()
+
+Returns only the backends that are currently marked as healthy.
+
+```typescript
+getHealthyBackends(): Backend[]
+```
+
+**Returns:** `Backend[]` - Array of backend objects where `health === true`.
+
+**Use case:** Used by the load balancer to select from available backends when routing requests.
+
+### markHealthy()
+
+Marks a specific backend as healthy and available for routing traffic.
+
+```typescript
+markHealthy(url: string): void
+```
+
+<ParamField path="url" type="string" required>
+  The URL of the backend to mark as healthy.
+</ParamField>
+
+**Behavior:**
+- Searches for a backend with matching URL
+- Sets `health: true` if found
+- No-op if URL doesn't match any backend in the pool
+
+### markUnhealthy()
+
+Marks a specific backend as unhealthy and removes it from rotation.
+
+```typescript
+markUnhealthy(url: string): void
+```
+
+<ParamField path="url" type="string" required>
+  The URL of the backend to mark as unhealthy.
+</ParamField>
+
+**Behavior:**
+- Searches for a backend with matching URL
+- Sets `health: false` if found
+- No-op if URL doesn't match any backend in the pool
+- Triggered by failed health checks or proxy errors
+
+## Usage examples
+
+### Creating a backend pool
+
+```typescript
+import { BackendPool } from './balancer/pool';
+
+const pool = new BackendPool([
+  'http://localhost:3001',
+  'http://localhost:3002',
+  'http://localhost:3003'
+]);
+
+console.log('Total backends:', pool.getAllBackends().length);
+// Output: Total backends: 3
+```
+
+### Querying backend health
+
+```typescript
+// Get all backends
+const allBackends = pool.getAllBackends();
+console.log('All backends:', allBackends);
+
+// Get only healthy backends
+const healthyBackends = pool.getHealthyBackends();
+console.log('Healthy backends:', healthyBackends.length);
+
+// Check specific backend health
+const backend = allBackends.find(b => b.url === 'http://localhost:3001');
+if (backend?.health) {
+  console.log('Backend is healthy');
+}
+```
+
+### Updating health status
+
+```typescript
+// Mark backend as unhealthy (e.g., after failed health check)
+pool.markUnhealthy('http://localhost:3001');
+console.log('Healthy count:', pool.getHealthyBackends().length);
+// Output: Healthy count: 2
+
+// Restore backend to healthy state
+pool.markHealthy('http://localhost:3001');
+console.log('Healthy count:', pool.getHealthyBackends().length);
+// Output: Healthy count: 3
+```
+
+### Integration with health checker
+
+```typescript
+import { HealthChecker } from './healthchecker/healthChecker';
+
+// Health checker automatically updates pool status
+const healthChecker = new HealthChecker(pool, 5000);
+healthChecker.start();
+
+// Health checker will call markHealthy() or markUnhealthy()
+// based on backend responses
+```
+
+### Handling proxy failures
+
+```typescript
+// When a proxy request fails, mark backend as unhealthy
+try {
+  await fetch(backend.url);
+} catch (error) {
+  pool.markUnhealthy(backend.url);
+  console.log('Backend marked unhealthy due to proxy error');
+}
+```
+
+## Related
+
+- [LoadBalancer](/api/load-balancer) - Uses BackendPool to select backends
+- [HealthChecker](/api/health-checker) - Updates backend health status
+- [ProxyHandler](/api/proxy-handler) - Marks backends unhealthy on proxy failures

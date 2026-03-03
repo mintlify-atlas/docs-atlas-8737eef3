@@ -1,0 +1,238 @@
+---
+title: Logger
+description: Utility class for structured logging of HTTP requests, responses, errors, and health check events
+---
+
+## Overview
+
+The `Logger` class provides static methods for logging various events in the load balancer. It outputs structured, formatted log messages to the console for monitoring request flow, debugging errors, and tracking backend health status.
+
+## Static methods
+
+### request
+
+Logs an incoming HTTP request that is being forwarded to a backend server.
+
+```typescript
+static request(method: string, path: string, backendUrl: string): void
+```
+
+<ParamField path="method" type="string" required>
+  The HTTP method (GET, POST, PUT, DELETE, etc.)
+</ParamField>
+
+<ParamField path="path" type="string" required>
+  The request path (e.g., "/api/users")
+</ParamField>
+
+<ParamField path="backendUrl" type="string" required>
+  The URL of the backend server receiving the request
+</ParamField>
+
+**Example log output**:
+```
+REQUEST: GET /api/users -> http://localhost:3001
+```
+
+---
+
+### response
+
+Logs the response received from a backend server.
+
+```typescript
+static response(method: string, path: string, backendUrl: string, statusCode: number, duration: number): void
+```
+
+<ParamField path="method" type="string" required>
+  The HTTP method of the original request
+</ParamField>
+
+<ParamField path="path" type="string" required>
+  The request path
+</ParamField>
+
+<ParamField path="backendUrl" type="string" required>
+  The URL of the backend server that sent the response
+</ParamField>
+
+<ParamField path="statusCode" type="number" required>
+  The HTTP status code returned by the backend (200, 404, 500, etc.)
+</ParamField>
+
+<ParamField path="duration" type="number" required>
+  The request duration in milliseconds
+</ParamField>
+
+**Example log output**:
+```
+RESPONSE: GET /api/users <- http://localhost:3001 [200] 45ms
+```
+
+---
+
+### error
+
+Logs an error message, optionally associated with a specific backend server.
+
+```typescript
+static error(message: string, backendUrl?: string): void
+```
+
+<ParamField path="message" type="string" required>
+  The error message to log
+</ParamField>
+
+<ParamField path="backendUrl" type="string">
+  Optional URL of the backend server related to the error
+</ParamField>
+
+**Example log output**:
+```
+ERROR: Connection refused
+ERROR: Connection timeout (http://localhost:3002)
+```
+
+---
+
+### info
+
+Logs a general informational message.
+
+```typescript
+static info(message: string): void
+```
+
+<ParamField path="message" type="string" required>
+  The informational message to log
+</ParamField>
+
+**Example log output**:
+```
+INFO: Load balancer started on port 8080
+```
+
+---
+
+### health
+
+Logs the health status of a backend server.
+
+```typescript
+static health(url: string, isHealthy: boolean, details?: string): void
+```
+
+<ParamField path="url" type="string" required>
+  The URL of the backend server being checked
+</ParamField>
+
+<ParamField path="isHealthy" type="boolean" required>
+  Whether the backend is healthy (true) or unhealthy (false)
+</ParamField>
+
+<ParamField path="details" type="string">
+  Optional additional details about the health check
+</ParamField>
+
+**Example log output**:
+```
+HEALTH: HEALTHY http://localhost:3001
+HEALTH: UNHEALTHY http://localhost:3002 - Connection timeout
+```
+
+## Usage examples
+
+### Logging a complete request/response cycle
+
+```typescript
+import { Logger } from './utils/logger';
+
+const method = 'GET';
+const path = '/api/users';
+const backendUrl = 'http://localhost:3001';
+
+// Log the outgoing request
+Logger.request(method, path, backendUrl);
+
+const startTime = Date.now();
+
+// ... make the actual request ...
+
+const duration = Date.now() - startTime;
+const statusCode = 200;
+
+// Log the received response
+Logger.response(method, path, backendUrl, statusCode, duration);
+```
+
+**Output**:
+```
+REQUEST: GET /api/users -> http://localhost:3001
+RESPONSE: GET /api/users <- http://localhost:3001 [200] 45ms
+```
+
+### Logging errors
+
+```typescript
+import { Logger } from './utils/logger';
+
+// General error
+Logger.error('Failed to initialize load balancer');
+
+// Backend-specific error
+const backendUrl = 'http://localhost:3002';
+Logger.error('Connection refused', backendUrl);
+```
+
+**Output**:
+```
+ERROR: Failed to initialize load balancer
+ERROR: Connection refused (http://localhost:3002)
+```
+
+### Logging health checks
+
+```typescript
+import { Logger } from './utils/logger';
+
+const backends = [
+  'http://localhost:3001',
+  'http://localhost:3002',
+  'http://localhost:3003'
+];
+
+backends.forEach(url => {
+  try {
+    // ... perform health check ...
+    const isHealthy = checkHealth(url);
+    Logger.health(url, isHealthy);
+  } catch (error) {
+    Logger.health(url, false, error.message);
+  }
+});
+```
+
+**Output**:
+```
+HEALTH: HEALTHY http://localhost:3001
+HEALTH: UNHEALTHY http://localhost:3002 - Connection timeout
+HEALTH: HEALTHY http://localhost:3003
+```
+
+### Logging informational messages
+
+```typescript
+import { Logger } from './utils/logger';
+
+const port = 8080;
+Logger.info(`Load balancer started on port ${port}`);
+
+const backendCount = 3;
+Logger.info(`Registered ${backendCount} backend servers`);
+```
+
+**Output**:
+```
+INFO: Load balancer started on port 8080
+INFO: Registered 3 backend servers
+```

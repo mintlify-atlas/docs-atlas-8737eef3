@@ -1,0 +1,104 @@
+---
+title: LoadBalancer
+description: Core load balancing class that distributes incoming requests across healthy backend servers using a configurable strategy
+---
+
+## Overview
+
+The `LoadBalancer` class is the central component of the HTTP load balancer. It coordinates between the backend pool and the load balancing strategy to select the optimal backend server for each incoming request.
+
+## Constructor
+
+Creates a new LoadBalancer instance with the specified backend pool and load balancing strategy.
+
+```typescript
+constructor(
+  backendPool: BackendPool,
+  strategy: RoundRobin
+)
+```
+
+<ParamField path="backendPool" type="BackendPool" required>
+  The pool of backend servers to distribute requests across. Maintains the health status of all backends.
+</ParamField>
+
+<ParamField path="strategy" type="RoundRobin" required>
+  The load balancing strategy to use for selecting backends. Currently supports round-robin distribution.
+</ParamField>
+
+## Methods
+
+### pickBackend()
+
+Selects the next healthy backend server to handle an incoming request based on the configured strategy.
+
+```typescript
+pickBackend(): Backend
+```
+
+**Returns:** `Backend` - The selected backend server object containing `url` and `health` properties.
+
+**Throws:** Error if no healthy backends are available.
+
+**Behavior:**
+- Retrieves all healthy backends from the backend pool
+- Delegates selection to the configured strategy (e.g., round-robin)
+- Returns a Backend object with the selected server's URL and health status
+
+## Usage examples
+
+### Basic setup
+
+```typescript
+import { LoadBalancer } from './balancer/loadBalancer';
+import { BackendPool } from './balancer/pool';
+import { RoundRobin } from './balancer/roundRobin';
+
+// Create backend pool with server URLs
+const pool = new BackendPool([
+  'http://localhost:3001',
+  'http://localhost:3002',
+  'http://localhost:3003'
+]);
+
+// Initialize load balancing strategy
+const strategy = new RoundRobin();
+
+// Create load balancer
+const loadBalancer = new LoadBalancer(pool, strategy);
+```
+
+### Selecting a backend
+
+```typescript
+try {
+  const backend = loadBalancer.pickBackend();
+  console.log(`Selected backend: ${backend.url}`);
+  // Forward request to backend.url
+} catch (error) {
+  console.error('No healthy backends available');
+  // Return 503 Service Unavailable
+}
+```
+
+### Integration with proxy handler
+
+```typescript
+import express from 'express';
+import { ProxyHandler } from './proxy/proxyHandler';
+
+const app = express();
+
+// Use load balancer with proxy handler
+app.use('*', ProxyHandler(loadBalancer, pool));
+
+app.listen(8080, () => {
+  console.log('Load balancer running on port 8080');
+});
+```
+
+## Related
+
+- [BackendPool](/api/backend-pool) - Manages the collection of backend servers
+- [HealthChecker](/api/health-checker) - Monitors backend server health
+- [ProxyHandler](/api/proxy-handler) - Proxies requests to selected backends

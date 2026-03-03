@@ -1,0 +1,85 @@
+---
+title: Load balancing
+description: Learn how the HTTP load balancer distributes traffic across backend servers
+---
+
+## What is load balancing?
+
+Load balancing is the process of distributing incoming network traffic across multiple backend servers to ensure no single server becomes overwhelmed. This improves application availability, reliability, and performance.
+
+<Info>
+Load balancing helps prevent server overload by spreading requests evenly across your infrastructure.
+</Info>
+
+## Why load balancing matters
+
+Without load balancing, all traffic would hit a single server, leading to:
+
+- **Performance bottlenecks** - One server handling all requests
+- **Single point of failure** - If the server goes down, your entire application is unavailable
+- **Poor resource utilization** - Other servers sit idle while one is overworked
+- **Limited scalability** - Can't handle traffic spikes effectively
+
+## How this implementation works
+
+The load balancer uses a strategy pattern to distribute traffic. The `LoadBalancer` class coordinates between the backend pool and the routing strategy:
+
+```typescript src/balancer/loadBalancer.ts
+import { type Backend } from "../types/types.ts"
+import { BackendPool } from "./pool.ts";
+import { RoundRobin } from "./roundRobin.ts";
+
+export class LoadBalancer {
+    constructor (
+        private backendPool: BackendPool,
+        private strategy: RoundRobin
+    ){}
+
+    pickBackend(): Backend {
+        const healthyBackends = this.backendPool.getHealthyBackends();
+        return this.strategy.pick(healthyBackends)
+    }
+}
+```
+
+## Request routing flow
+
+When a request comes in, the load balancer follows this flow:
+
+<Steps>
+  <Step title="Get healthy backends">
+    The load balancer queries the backend pool for all healthy servers using `getHealthyBackends()`. This ensures traffic only goes to available servers.
+  </Step>
+  
+  <Step title="Apply routing strategy">
+    The list of healthy backends is passed to the routing strategy (e.g., Round Robin), which selects the next server to handle the request.
+  </Step>
+  
+  <Step title="Return selected backend">
+    The chosen backend is returned, and the request is forwarded to that server.
+  </Step>
+</Steps>
+
+<Note>
+The load balancer only considers healthy backends when routing traffic. Unhealthy servers are automatically excluded from the rotation.
+</Note>
+
+## Key components
+
+The load balancer architecture consists of three main components:
+
+### Backend pool
+
+Manages the collection of backend servers and their health status. See [Backend pool](/concepts/backend-pool) for details.
+
+### Routing strategy
+
+Determines which backend server should handle the next request. See [Strategies](/concepts/strategies) for available options.
+
+### Health checker
+
+Monitors backend server health and updates the pool accordingly. See [Health checking](/concepts/health-checking) for details.
+
+<Tip>
+The separation of concerns between these components makes the system extensible - you can swap routing strategies without changing the core load balancing logic.
+</Tip>

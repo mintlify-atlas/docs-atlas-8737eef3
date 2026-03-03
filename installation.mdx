@@ -1,0 +1,279 @@
+---
+title: Installation
+description: Prerequisites, installation steps, and project structure for the HTTP load balancer
+---
+
+## Prerequisites
+
+Before installing the load balancer, ensure you have the Bun runtime installed.
+
+### Install Bun
+
+Bun is a fast JavaScript runtime and package manager that powers this load balancer.
+
+<CodeGroup>
+```bash macOS and Linux
+curl -fsSL https://bun.sh/install | bash
+```
+
+```bash Windows (WSL)
+curl -fsSL https://bun.sh/install | bash
+```
+
+```bash Homebrew
+brew tap oven-sh/bun
+brew install bun
+```
+</CodeGroup>
+
+Verify the installation:
+
+```bash
+bun --version
+```
+
+You should see version 1.0.0 or higher.
+
+<Note>
+**Why Bun?** This project uses Bun for its exceptional performance, built-in TypeScript support without compilation, and fast package installation. The load balancer can handle high request throughput thanks to Bun's optimized HTTP primitives.
+</Note>
+
+## Installation steps
+
+<Steps>
+  <Step title="Clone the repository">
+    Clone the project from GitHub:
+    
+    ```bash
+    git clone https://github.com/rishav76dev/LoadBalancer.git
+    cd LoadBalancer
+    ```
+  </Step>
+  
+  <Step title="Install dependencies">
+    Install all required packages using Bun:
+    
+    ```bash
+    bun install
+    ```
+    
+    This installs:
+    - `express` - HTTP server framework
+    - `express-http-proxy` - Reverse proxy middleware
+    - `dotenv` - Environment variable management
+    - TypeScript types for development
+  </Step>
+  
+  <Step title="Verify installation">
+    Confirm everything is set up correctly by running:
+    
+    ```bash
+    bun run start
+    ```
+    
+    You should see:
+    
+    ```
+    INFO: Load balancer running on port 3000
+    INFO: Backend servers: http://localhost:3001, http://localhost:3002, http://localhost:3003
+    INFO: Health checker started (checking every 5s)
+    ```
+    
+    <Warning>
+    The load balancer will start even if backend servers aren't running yet. You'll see health check failures until you start the backends.
+    </Warning>
+  </Step>
+</Steps>
+
+## Project structure
+
+Here's the complete directory layout:
+
+```
+loadbalancer/
+├── src/
+│   ├── index.ts                  # Entry point - wires all components
+│   ├── balancer/
+│   │   ├── loadBalancer.ts       # Core balancer orchestration
+│   │   ├── pool.ts               # Backend pool management
+│   │   └── roundRobin.ts         # Round-robin strategy
+│   ├── healthchecker/
+│   │   └── healthChecker.ts      # Periodic health monitoring
+│   ├── proxy/
+│   │   └── proxyHandler.ts       # Express middleware for proxying
+│   ├── types/
+│   │   └── types.ts              # TypeScript interfaces
+│   └── utils/
+│       └── logger.ts             # Structured logging utilities
+├── package.json                  # Project metadata and scripts
+├── tsconfig.json                 # TypeScript configuration
+├── bun.lock                      # Dependency lock file
+└── README.md                     # Project documentation
+```
+
+### Key directories explained
+
+**`src/balancer/`** — Contains the core load balancing logic. The `LoadBalancer` class orchestrates the `BackendPool` and routing `RoundRobin` strategy to select backends for incoming requests.
+
+**`src/healthchecker/`** — Implements periodic health checks using `fetch()` with timeout controllers. Runs checks in parallel and updates the backend pool's health status.
+
+**`src/proxy/`** — Contains the Express middleware that forwards requests to selected backends using `express-http-proxy`. Handles errors and marks backends as unhealthy on failures.
+
+**`src/types/`** — Defines TypeScript interfaces used across the application. Currently contains the `Backend` interface with `url` and `health` properties.
+
+**`src/utils/`** — Utility modules including the structured logger that provides color-coded, categorized logging for requests, responses, health checks, and errors.
+
+## Configuration
+
+The load balancer is configured directly in `src/index.ts`. You can customize:
+
+### Backend servers
+
+Edit the `backendUrls` array to add or remove backend servers:
+
+```typescript src/index.ts
+const backendUrls = [
+    "http://localhost:3001",
+    "http://localhost:3002",
+    "http://localhost:3003",
+    "http://localhost:3004", // Add more backends
+];
+```
+
+### Health check interval
+
+Change the health check frequency by modifying the second parameter (in milliseconds):
+
+```typescript src/index.ts
+// Check every 10 seconds instead of 5
+const healthChecker = new HealthChecker(backendPool, 10000);
+```
+
+### Load balancer port
+
+Change the port the load balancer listens on:
+
+```typescript src/index.ts
+const PORT = 8080; // Use port 8080 instead of 3000
+```
+
+<Tip>
+For production deployments, consider moving these configurations to environment variables using the included `dotenv` package.
+</Tip>
+
+## Available scripts
+
+The `package.json` defines these npm scripts:
+
+| Script | Command | Description |
+|--------|---------|-------------|
+| `start` | `bun run src/index.ts` | Start the load balancer in production mode |
+| `dev` | `bun --watch src/index.ts` | Start with auto-reload on file changes |
+| `build` | `tsc -b` | Compile TypeScript to JavaScript |
+
+### Running in development mode
+
+For development with automatic reload:
+
+```bash
+bun run dev
+```
+
+This uses Bun's `--watch` flag to restart the server whenever source files change.
+
+### Building for production
+
+While Bun can run TypeScript directly, you can compile to JavaScript:
+
+```bash
+bun run build
+```
+
+Compiled files will be output according to your `tsconfig.json` settings.
+
+## Environment setup
+
+The project includes `dotenv` for environment variable management. Create a `.env` file in the project root for environment-specific configuration:
+
+```bash .env
+# Load balancer configuration
+PORT=3000
+HEALTH_CHECK_INTERVAL=5000
+
+# Backend servers (comma-separated)
+BACKEND_URLS=http://localhost:3001,http://localhost:3002,http://localhost:3003
+
+# Logging
+LOG_LEVEL=info
+```
+
+<Info>
+The current implementation uses hardcoded values in `src/index.ts`. To use environment variables, you'll need to load them with `dotenv` and update the configuration accordingly.
+</Info>
+
+## TypeScript configuration
+
+The project uses strict TypeScript settings defined in `tsconfig.json`:
+
+```json tsconfig.json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  }
+}
+```
+
+Strict mode ensures type safety and catches potential errors at compile time.
+
+## Troubleshooting
+
+### Bun command not found
+
+If you get "command not found" after installing Bun, restart your terminal or add Bun to your PATH:
+
+```bash
+export PATH="$HOME/.bun/bin:$PATH"
+```
+
+Add this line to your `~/.bashrc` or `~/.zshrc` to make it permanent.
+
+### Port already in use
+
+If port 3000 is already in use, either:
+
+1. Stop the process using that port
+2. Change the `PORT` constant in `src/index.ts` to a different value
+
+### Health checks failing
+
+If you see continuous health check failures, ensure:
+
+1. Backend servers are running on the configured ports
+2. The backend URLs in `backendUrls` are correct
+3. No firewall is blocking connections to localhost
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart guide" icon="rocket" href="/quickstart">
+    Get up and running with test backends in 5 minutes
+  </Card>
+  
+  <Card title="Architecture overview" icon="diagram-project" href="/architecture/overview">
+    Learn how the components work together
+  </Card>
+  
+  <Card title="API reference" icon="code" href="/api/load-balancer">
+    Explore the core classes and methods
+  </Card>
+  
+  <Card title="Extending strategies" icon="puzzle-piece" href="/extending-strategies">
+    Add custom load balancing algorithms
+  </Card>
+</CardGroup>

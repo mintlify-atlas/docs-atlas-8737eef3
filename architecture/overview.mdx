@@ -1,0 +1,193 @@
+---
+title: Architecture overview
+description: High-level architecture of the HTTP Load Balancer and its request flow
+---
+
+The HTTP Load Balancer is a **Layer 7 load balancer** built from scratch in TypeScript using the Bun runtime. It distributes incoming HTTP traffic across multiple backend servers with automatic health checking, failover handling, and structured logging.
+
+## System architecture
+
+The load balancer follows a modular architecture where each component has a single, well-defined responsibility:
+
+```
+                         ┌─────────────────────┐
+    Client Request ────▶ │   Express Server     │
+                         │   (Port 3000)        │
+                         └────────┬─────────────┘
+                                  │
+                         ┌────────▼─────────────┐
+                         │   Load Balancer       │
+                         │   (Round Robin)       │
+                         └────────┬─────────────┘
+                                  │
+                    ┌─────────────┼─────────────┐
+                    ▼             ▼              ▼
+              ┌──────────┐ ┌──────────┐  ┌──────────┐
+              │ Backend 1│ │ Backend 2│  │ Backend 3│
+              │ :3001    │ │ :3002    │  │ :3003    │
+              └──────────┘ └──────────┘  └──────────┘
+                    ▲             ▲              ▲
+                    └─────────────┼──────────────┘
+                         ┌───────┴──────────┐
+                         │  Health Checker   │
+                         │  (Every 5s)       │
+                         └──────────────────┘
+```
+
+<Info>
+  The load balancer operates at Layer 7 (HTTP), which means it can inspect HTTP headers, paths, and methods to make intelligent routing decisions.
+</Info>
+
+## Request flow
+
+Every request follows this path through the system:
+
+### 1. Request arrival
+
+A client sends an HTTP request to the Express server running on port 3000:
+
+```typescript
+// src/index.ts:26
+app.use("/", ProxyHandler(loadBalancer, backendPool))
+```
+
+### 2. Backend selection
+
+The `ProxyHandler` asks the `LoadBalancer` to pick a healthy backend:
+
+```typescript
+// src/proxy/proxyHandler.ts:15-21
+try {
+  backend = loadBalancer.pickBackend();
+} catch (err) {
+  Logger.error("No healthy backends available");
+  res.status(503).send("No healthy backends available");
+  return;
+}
+```
+
+The `LoadBalancer` queries the `BackendPool` for healthy backends and uses the configured strategy (Round Robin) to select one:
+
+```typescript
+// src/balancer/loadBalancer.ts:12-15
+pickBackend(): Backend {
+  const healthyBackends = this.backendPool.getHealthyBackends();
+  return this.strategy.pick(healthyBackends)
+}
+```
+
+### 3. Request proxying
+
+The request is forwarded to the selected backend using `express-http-proxy`. The system tracks:
+
+- Request timing (start time)
+- Backend URL
+- Response status code
+- Total duration
+
+```typescript
+// src/proxy/proxyHandler.ts:23
+Logger.request(req.method, req.path, backend.url);
+```
+
+### 4. Response handling
+
+When the backend responds, the load balancer logs the response details:
+
+```typescript
+// src/proxy/proxyHandler.ts:26-29
+userResDecorator: (proxyRes, proxyResData, userReq, userRes) => {
+  const duration = Date.now() - startTime;
+  Logger.response(req.method, req.path, backend.url, proxyRes.statusCode || 0, duration);
+  return proxyResData;
+}
+```
+
+### 5. Error handling
+
+If the backend fails, the load balancer:
+
+1. Marks the backend as unhealthy immediately
+2. Returns a `502 Bad Gateway` to the client
+3. Logs the failure
+
+```typescript
+// src/proxy/proxyHandler.ts:31-37
+proxyErrorHandler: (err, res, next) => {
+  const duration = Date.now() - startTime;
+  Logger.error(`Backend failed after ${duration}ms`, backend.url);
+  
+  backendPool.markUnhealthy(backend.url);
+  
+  res.status(502).send("Bad gateway");
+}
+```
+
+<Note>
+  Failed backends are **immediately** removed from rotation. They won't receive any more traffic until the health checker confirms they've recovered.
+</Note>
+
+## Health checking integration
+
+The `HealthChecker` runs continuously in the background, independent of request handling:
+
+### Startup
+
+The health checker starts immediately when the application launches:
+
+```typescript
+// src/index.ts:22-24
+const healthChecker = new HealthChecker(backendPool, 5000);
+healthChecker.start();
+Logger.info("Health checker started (checking every 5s)");
+```
+
+### Continuous monitoring
+
+Every 5 seconds, the health checker:
+
+1. Fetches all backends from the pool (both healthy and unhealthy)
+2. Sends a health check request to each one **in parallel**
+3. Updates the `BackendPool` based on the results
+
+```typescript
+// src/healthchecker/healthChecker.ts:18-19
+const backends = this.backendPool.getAllBackends();
+const checks = backends.map(async (backend) => { /* ... */ });
+```
+
+### Automatic recovery
+
+When a previously unhealthy backend starts responding successfully, it's automatically marked healthy and re-added to the rotation:
+
+```typescript
+// src/healthchecker/healthChecker.ts:27-29
+if (res.ok) {
+  this.backendPool.markHealthy(backend.url);
+  Logger.health(backend.url, true, `status: ${res.status}`);
+}
+```
+
+<Info>
+  Health checks use `AbortController` with a 3-second timeout to prevent slow backends from blocking the entire health check cycle.
+</Info>
+
+## Key architectural benefits
+
+<Tabs>
+  <Tab title="Fault tolerance">
+    Failed backends are immediately removed from rotation. The system continues serving traffic using remaining healthy backends.
+  </Tab>
+  
+  <Tab title="Automatic recovery">
+    No manual intervention needed. Once a backend recovers, it's automatically detected and re-added to the pool.
+  </Tab>
+  
+  <Tab title="Observability">
+    Every request, response, health check, and error is logged with structured, categorized output.
+  </Tab>
+  
+  <Tab title="Extensibility">
+    The strategy pattern makes it trivial to add new load balancing algorithms without touching core code.
+  </Tab>
+</Tabs>

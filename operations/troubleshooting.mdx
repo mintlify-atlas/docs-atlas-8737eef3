@@ -1,0 +1,279 @@
+---
+title: Troubleshooting
+description: Common issues, error messages, and solutions for the HTTP Load Balancer
+---
+
+## Common errors
+
+### 503 Service Unavailable
+
+**Error message**: `No healthy backends available`
+
+**Cause**: The load balancer cannot find any healthy backend servers to route requests to. This happens when:
+- All backend servers are down or unreachable
+- All backends are returning non-2xx status codes during health checks
+- Health check timeouts are occurring on all backends
+
+**Error code location**: `src/proxy/proxyHandler.ts:18-20`
+
+```typescript src/proxy/proxyHandler.ts
+try {
+  backend = loadBalancer.pickBackend();
+} catch (err) {
+  Logger.error("No healthy backends available");
+  res.status(503).send("No healthy backends available");
+  return;
+}
+```
+
+**Solutions**:
+
+<Steps>
+  <Step title="Check backend server status">
+    Verify that at least one backend server is running and accepting connections:
+
+    ```bash
+    curl http://localhost:3001
+    curl http://localhost:3002
+    curl http://localhost:3003
+    ```
+  </Step>
+
+  <Step title="Review health check logs">
+    Look for HEALTH log entries to see why backends are marked unhealthy:
+
+    ```
+    HEALTH: UNHEALTHY http://localhost:3001 - Connection refused
+    HEALTH: UNHEALTHY http://localhost:3002 - status: 500
+    ```
+  </Step>
+
+  <Step title="Wait for health check cycle">
+    If you just started a backend, wait up to 5 seconds for the next health check cycle to detect it.
+  </Step>
+
+  <Step title="Verify backend URLs">
+    Ensure backend URLs in `src/index.ts` match your actual backend server addresses.
+  </Step>
+</Steps>
+
+### 502 Bad Gateway
+
+**Error message**: `Bad gateway`
+
+**Cause**: The selected backend server failed while processing the request. This occurs when:
+- The backend crashes mid-request
+- Network connection to the backend is lost
+- The backend closes the connection unexpectedly
+
+**Error code location**: `src/proxy/proxyHandler.ts:31-38`
+
+```typescript src/proxy/proxyHandler.ts
+proxyErrorHandler: (err, res, next) => {
+  const duration = Date.now() - startTime;
+  Logger.error(`Backend failed after ${duration}ms`, backend.url);
+
+  backendPool.markUnhealthy(backend.url);
+
+  res.status(502).send("Bad gateway");
+}
+```
+
+**Solutions**:
+
+<Steps>
+  <Step title="Check backend logs">
+    Review the failing backend's logs for errors or crashes.
+  </Step>
+
+  <Step title="Verify automatic failover">
+    The load balancer automatically marks the failing backend as unhealthy. Check HEALTH logs to confirm:
+
+    ```
+    ERROR: Backend failed after 2034ms (http://localhost:3002)
+    HEALTH: UNHEALTHY http://localhost:3002 - Connection refused
+    ```
+  </Step>
+
+  <Step title="Monitor recovery">
+    Once the backend recovers, it will be automatically re-added to the pool on the next successful health check.
+  </Step>
+</Steps>
+
+<Info>
+  When a backend fails, the load balancer **immediately** marks it unhealthy (line 35 in proxyHandler.ts). You don't need to wait for the next health check cycle.
+</Info>
+
+## FAQ and solutions
+
+<Accordion title="Why are requests still routed to an unhealthy backend?">
+  This should not happen. The load balancer only selects from `BackendPool.getHealthyBackends()` (see `src/balancer/pool.ts:16-18`).
+
+  If you're seeing this:
+  1. Check that the backend was marked unhealthy (look for `HEALTH: UNHEALTHY` or `ERROR: Backend failed` logs)
+  2. Verify the health check is running (`INFO: Health checker started`)
+  3. Ensure you're not caching responses on the client side
+
+  ```typescript src/balancer/pool.ts
+  getHealthyBackends() : Backend[] {
+      return this.backends.filter(backend => backend.health);
+  }
+  ```
+</Accordion>
+
+<Accordion title="Health checks are timing out on all backends">
+  The default health check timeout is 3 seconds (enforced via `AbortController`).
+
+  **Possible causes**:
+  - Backends are overloaded and responding slowly
+  - Network latency between load balancer and backends is high
+  - Backend health check endpoint is doing expensive operations
+
+  **Solutions**:
+  - Increase the timeout in `src/healthchecker/healthChecker.ts:22` (currently `3000`ms)
+  - Optimize backend response time
+  - Use a dedicated lightweight health check endpoint on backends
+
+  ```typescript src/healthchecker/healthChecker.ts
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 3000); // Increase this value
+  ```
+</Accordion>
+
+<Accordion title="A recovered backend isn't being used">
+  The health checker runs every 5 seconds by default. Wait for the next health check cycle.
+
+  **To verify recovery**:
+  1. Watch for `HEALTH: HEALTHY` log entries
+  2. Check that subsequent requests are routed to the recovered backend
+
+  **To speed up recovery**:
+  - Reduce the health check interval in `src/index.ts` (currently `5000`ms)
+
+  ```typescript src/index.ts
+  const healthChecker = new HealthChecker(backendPool, 2000); // Check every 2s
+  ```
+</Accordion>
+
+<Accordion title="Round robin distribution is uneven">
+  **Expected behavior**: With 3 backends, requests should be distributed 1→2→3→1→2→3...
+
+  **If distribution is uneven, check**:
+  - Are all backends healthy? Unhealthy backends are skipped in rotation
+  - Review `REQUEST` logs to verify the actual distribution pattern
+
+  **Note**: If backends become unhealthy mid-rotation, the round-robin counter continues but skips unhealthy backends, which can temporarily skew distribution.
+</Accordion>
+
+<Accordion title="How do I add a new backend without downtime?">
+  <Steps>
+    <Step title="Add the URL to the configuration">
+      Edit `src/index.ts` and add the new backend URL to the `backendUrls` array:
+
+      ```typescript
+      const backendUrls = [
+          "http://localhost:3001",
+          "http://localhost:3002",
+          "http://localhost:3003",
+          "http://localhost:3004"  // New backend
+      ];
+      ```
+    </Step>
+
+    <Step title="Restart the load balancer">
+      ```bash
+      bun run start
+      ```
+    </Step>
+
+    <Step title="Verify health check">
+      Watch logs for:
+      ```
+      HEALTH: HEALTHY http://localhost:3004 - status: 200
+      ```
+    </Step>
+  </Steps>
+
+  <Warning>
+    There is currently no hot-reload support for configuration changes. Restarting the load balancer will briefly interrupt traffic.
+  </Warning>
+</Accordion>
+
+<Accordion title="Connection refused errors during startup">
+  **Cause**: The health checker runs immediately on startup before all backends are ready.
+
+  **Expected behavior**: You may see `UNHEALTHY` logs during startup:
+  ```
+  HEALTH: UNHEALTHY http://localhost:3001 - Connection refused
+  ```
+
+  **This is normal if**:
+  - Backends start slower than the load balancer
+  - You're testing with backends that aren't running yet
+
+  **The backends will be automatically marked healthy** once the next health check succeeds.
+</Accordion>
+
+<Accordion title="High response times logged">
+  Response time is measured in `ProxyHandler` from when the backend is selected until the response is received:
+
+  ```typescript src/proxy/proxyHandler.ts
+  const startTime = Date.now();
+  // ... proxy request ...
+  const duration = Date.now() - startTime;
+  Logger.response(req.method, req.path, backend.url, proxyRes.statusCode || 0, duration);
+  ```
+
+  **High response times indicate**:
+  - Backend is slow to process the request
+  - Network latency between load balancer and backend
+  - Backend is under heavy load
+
+  **Solutions**:
+  - Investigate backend performance
+  - Add more backend servers to distribute load
+  - Implement caching on backends
+</Accordion>
+
+## Debugging tips
+
+<Tip>
+  Enable verbose logging by monitoring both stdout (INFO, REQUEST, RESPONSE, HEALTH) and stderr (ERROR) separately:
+
+  ```bash
+  bun run start 2> errors.log | tee requests.log
+  ```
+</Tip>
+
+### Verify backend pool state
+
+While there's no built-in admin dashboard yet, you can inspect the backend pool state by adding temporary debug logs:
+
+```typescript src/index.ts
+// Add after health checker starts
+setInterval(() => {
+  const healthy = backendPool.getHealthyBackends();
+  Logger.info(`Healthy backends: ${healthy.length}/${backendPool.getAllBackends().length}`);
+}, 10000); // Log every 10 seconds
+```
+
+### Test with curl
+
+Test individual backends directly:
+```bash
+# Test backend directly
+curl -v http://localhost:3001
+
+# Test through load balancer
+curl -v http://localhost:3000
+```
+
+### Simulate backend failure
+
+To test automatic failover:
+1. Send requests through the load balancer
+2. Kill one backend server (Ctrl+C)
+3. Observe the `ERROR` and `HEALTH: UNHEALTHY` logs
+4. Verify subsequent requests skip the failed backend
+5. Restart the backend
+6. Watch for `HEALTH: HEALTHY` and confirm it re-enters rotation

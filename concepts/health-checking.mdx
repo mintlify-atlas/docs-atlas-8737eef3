@@ -1,0 +1,171 @@
+---
+title: Health checking
+description: Understand how the load balancer monitors backend server health and handles failures
+---
+
+## How health checks work
+
+Health checking is a critical mechanism that ensures traffic is only routed to operational backend servers. The `HealthChecker` class periodically polls each backend to verify it's responding correctly.
+
+<Info>
+By default, health checks run every 5 seconds with a 3-second timeout per check.
+</Info>
+
+## Health check implementation
+
+The health checker uses parallel HTTP requests to monitor all backends simultaneously:
+
+```typescript src/healthchecker/healthChecker.ts
+export class HealthChecker {
+  private intervalMs: number;
+  private isRunning: boolean = false;
+  private backendPool: BackendPool;  
+
+  constructor(backendPool: BackendPool, intervalMs: number = 5000) {
+    this.backendPool = backendPool;   
+    this.intervalMs = intervalMs;
+  }
+
+  async checkAll() {
+    const backends = this.backendPool.getAllBackends();
+
+    const checks = backends.map(async (backend) => {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3000); 
+
+        const res = await fetch(backend.url, { signal: controller.signal });
+        clearTimeout(timeoutId);
+
+        if (res.ok) {
+          this.backendPool.markHealthy(backend.url);
+          Logger.health(backend.url, true, `status: ${res.status}`);
+        } else {
+          this.backendPool.markUnhealthy(backend.url);
+          Logger.health(backend.url, false, `status: ${res.status}`);
+        }
+      } catch (err) {
+        this.backendPool.markUnhealthy(backend.url);
+        const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+        Logger.health(backend.url, false, errorMsg);
+      }
+    });
+
+    await Promise.all(checks);
+  }
+}
+```
+
+## Key features
+
+### Parallel health checks
+
+The implementation uses `Promise.all()` to check all backends simultaneously rather than sequentially. This ensures:
+
+- **Fast health checks** - All servers are checked at once
+- **Consistent timing** - The 5-second interval applies to all backends together
+- **Efficient resource usage** - No waiting for slow servers to timeout before checking others
+
+<Note>
+Using `Promise.all()` means if you have 10 backends, they're all checked in parallel, not one after another.
+</Note>
+
+### Timeout handling with AbortController
+
+Each health check has a 3-second timeout enforced using `AbortController`:
+
+```typescript
+const controller = new AbortController();
+const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+const res = await fetch(backend.url, { signal: controller.signal });
+clearTimeout(timeoutId);
+```
+
+This prevents hanging requests from blocking health checks:
+
+- If a server doesn't respond within 3 seconds, the request is aborted
+- The backend is marked as unhealthy
+- The health checker moves on without waiting
+
+<Warning>
+Servers that consistently timeout (>3s response time) will be marked unhealthy and removed from the rotation.
+</Warning>
+
+### Health check interval
+
+The default interval is 5 seconds, meaning:
+
+- Every 5 seconds, all backends are checked
+- Healthy servers respond quickly and stay in rotation
+- Failed servers are detected within 5 seconds maximum
+
+```typescript src/healthchecker/healthChecker.ts
+private async runLoop() {
+  if (!this.isRunning) return;
+
+  await this.checkAll();
+
+  setTimeout(() => {
+    this.runLoop();
+  }, this.intervalMs);
+}
+```
+
+<Tip>
+You can adjust the interval when constructing the HealthChecker: `new HealthChecker(backendPool, 10000)` for 10-second checks.
+</Tip>
+
+## Recovery mechanism
+
+When a backend recovers from failure, it's automatically added back to the pool:
+
+<Steps>
+  <Step title="Backend fails health check">
+    The server is marked as unhealthy and removed from the rotation. No traffic is sent to it.
+  </Step>
+  
+  <Step title="Continuous monitoring">
+    The health checker continues polling the failed backend every 5 seconds.
+  </Step>
+  
+  <Step title="Server recovers">
+    When the backend starts responding with `res.ok` status codes (2xx), it's marked healthy again.
+  </Step>
+  
+  <Step title="Back in rotation">
+    The recovered server immediately starts receiving traffic in the next load balancing cycle.
+  </Step>
+</Steps>
+
+<Info>
+Recovery is automatic - no manual intervention needed. Failed servers rejoin the pool as soon as they're healthy.
+</Info>
+
+## Starting and stopping health checks
+
+The health checker lifecycle is managed with `start()` and `stop()` methods:
+
+```typescript src/healthchecker/healthChecker.ts
+start() {
+  if (this.isRunning) return;
+
+  this.isRunning = true;
+  
+  this.checkAll().then(() => {
+    this.runLoop();
+  });
+}
+
+stop() {
+  this.isRunning = false;
+}
+```
+
+- `start()` runs an immediate health check, then begins the polling loop
+- `stop()` halts the loop gracefully
+- The `isRunning` flag prevents duplicate loops
+
+<Note>
+Health checks start immediately when `start()` is called - you don't wait 5 seconds for the first check.
+</Note>

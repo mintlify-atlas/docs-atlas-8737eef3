@@ -1,0 +1,435 @@
+---
+title: Components
+description: Detailed breakdown of each component in the load balancer system
+---
+
+The load balancer is composed of six core components, each with a single, well-defined responsibility. This separation of concerns makes the codebase maintainable, testable, and extensible.
+
+## Component overview
+
+| Component | Responsibility | Location |
+|-----------|---------------|----------|
+| `LoadBalancer` | Orchestrates backend selection using a pluggable strategy | `src/balancer/loadBalancer.ts` |
+| `BackendPool` | Manages backend server registry and health state | `src/balancer/pool.ts` |
+| `RoundRobin` | Implements the round-robin routing algorithm | `src/balancer/roundRobin.ts` |
+| `HealthChecker` | Periodically verifies backend availability | `src/healthchecker/healthChecker.ts` |
+| `ProxyHandler` | Forwards requests and handles proxy errors | `src/proxy/proxyHandler.ts` |
+| `Logger` | Structured, categorized log output | `src/utils/logger.ts` |
+
+---
+
+## LoadBalancer
+
+**Purpose**: Orchestrates backend selection by combining the `BackendPool` and a routing strategy.
+
+### Interface
+
+```typescript
+// src/balancer/loadBalancer.ts
+export class LoadBalancer {
+  constructor (
+    private backendPool: BackendPool,
+    private strategy: RoundRobin
+  ){}
+
+  pickBackend(): Backend {
+    const healthyBackends = this.backendPool.getHealthyBackends();
+    return this.strategy.pick(healthyBackends)
+  }
+}
+```
+
+### Responsibilities
+
+- Queries the `BackendPool` for healthy backends
+- Delegates the selection logic to the configured strategy
+- Throws an error if no backends are available (handled by `ProxyHandler`)
+
+### Interactions
+
+<Accordion title="How LoadBalancer interacts with other components">
+  - **BackendPool**: Calls `getHealthyBackends()` to retrieve only backends marked as healthy
+  - **RoundRobin** (or any strategy): Calls `pick()` to select one backend from the healthy list
+  - **ProxyHandler**: Used by `ProxyHandler` to determine which backend should receive the request
+</Accordion>
+
+<Info>
+  The `LoadBalancer` class is agnostic to the specific routing algorithm. You can inject any strategy that implements a `pick(backends: Backend[]): Backend` method.
+</Info>
+
+---
+
+## BackendPool
+
+**Purpose**: Central registry for all backend servers and their health status.
+
+### Interface
+
+```typescript
+// src/balancer/pool.ts
+export class BackendPool {
+  private backends: Backend[];
+
+  constructor(urls: string[]){
+    this.backends = urls.map((url: string) => ({
+      url, health:true
+    }))
+  }
+
+  getAllBackends(): Backend[] {
+    return this.backends;
+  }
+  
+  getHealthyBackends() : Backend[] {
+    return this.backends.filter(backend => backend.health);
+  }
+
+  markUnhealthy(url: string): void {
+    const backend = this.backends.find(b => b.url === url);
+    if(backend){
+      backend.health = false
+    }
+  }
+
+  markHealthy(url: string): void {
+    const backend  = this.backends.find(b => b.url === url);
+    if(backend){
+      backend.health = true
+    }
+  }
+}
+```
+
+### Backend data structure
+
+```typescript
+// src/types/types.ts
+export interface Backend {
+  url: string,
+  health: boolean
+}
+```
+
+### Responsibilities
+
+- Stores all backend servers with their URLs and health status
+- Provides filtered views of backends (all vs. healthy only)
+- Allows health status updates via `markHealthy()` and `markUnhealthy()`
+
+### Interactions
+
+<Accordion title="How BackendPool interacts with other components">
+  - **LoadBalancer**: Calls `getHealthyBackends()` when selecting a backend for a request
+  - **HealthChecker**: Calls `getAllBackends()` to get the full list, then updates health status
+  - **ProxyHandler**: Calls `markUnhealthy()` when a proxy request fails
+</Accordion>
+
+<Note>
+  All backends start as healthy by default. The `HealthChecker` performs an initial check immediately on startup to verify actual health status.
+</Note>
+
+---
+
+## RoundRobin
+
+**Purpose**: Implements the round-robin load balancing strategy.
+
+### Interface
+
+```typescript
+// src/balancer/roundRobin.ts
+export class RoundRobin {
+  private index = 0; 
+
+  pick (backends: Backend[]): Backend { 
+    if (backends.length === 0){
+      throw new Error(" No backend is available")
+    }
+
+    const backend = backends[this.index % backends.length]!;
+    this.index++;
+
+    return backend;
+  }
+}
+```
+
+### Responsibilities
+
+- Maintains an internal index counter
+- Distributes requests evenly across all healthy backends
+- Uses modulo arithmetic to cycle through backends infinitely
+
+### Algorithm details
+
+1. **Initialization**: Starts with `index = 0`
+2. **Selection**: Returns `backends[index % backends.length]`
+3. **Increment**: Increments `index` after each selection
+4. **Wraparound**: When `index` exceeds `backends.length`, modulo wraps it back to 0
+
+### Interactions
+
+<Accordion title="How RoundRobin interacts with other components">
+  - **LoadBalancer**: Called by `LoadBalancer.pickBackend()` to select the next backend
+  - Receives a filtered list of **only healthy backends** from `LoadBalancer`
+</Accordion>
+
+<Info>
+  The strategy pattern used here makes it easy to implement alternative algorithms like Least Connections, Weighted Round Robin, or IP Hash without modifying any other components.
+</Info>
+
+---
+
+## HealthChecker
+
+**Purpose**: Continuously monitors backend availability with parallel health checks.
+
+### Interface
+
+```typescript
+// src/healthchecker/healthChecker.ts
+export class HealthChecker {
+  private intervalMs: number;
+  private isRunning: boolean = false;
+  private backendPool: BackendPool;  
+
+  constructor(backendPool: BackendPool, intervalMs: number = 5000) {
+    this.backendPool = backendPool;   
+    this.intervalMs = intervalMs;
+  }
+
+  async checkAll() {
+    const backends = this.backendPool.getAllBackends();
+
+    const checks = backends.map(async (backend) => {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+        const res = await fetch(backend.url, { signal: controller.signal });
+        clearTimeout(timeoutId);
+
+        if (res.ok) {
+          this.backendPool.markHealthy(backend.url);
+          Logger.health(backend.url, true, `status: ${res.status}`);
+        } else {
+          this.backendPool.markUnhealthy(backend.url);
+          Logger.health(backend.url, false, `status: ${res.status}`);
+        }
+      } catch (err) {
+        this.backendPool.markUnhealthy(backend.url);
+        const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+        Logger.health(backend.url, false, errorMsg);
+      }
+    });
+
+    await Promise.all(checks);
+  }
+
+  start() { /* ... */ }
+  stop() { /* ... */ }
+}
+```
+
+### Responsibilities
+
+- Runs health checks at a configurable interval (default: 5 seconds)
+- Uses `AbortController` to implement per-request timeouts (3 seconds)
+- Updates the `BackendPool` based on health check results
+- Logs all health status changes
+
+### Health check criteria
+
+<Tabs>
+  <Tab title="Healthy">
+    A backend is marked healthy if:
+    - The HTTP request completes within 3 seconds
+    - The response status is `2xx` (checked via `res.ok`)
+  </Tab>
+  
+  <Tab title="Unhealthy">
+    A backend is marked unhealthy if:
+    - The request times out after 3 seconds
+    - The response status is not `2xx`
+    - Any network error occurs (connection refused, DNS failure, etc.)
+  </Tab>
+</Tabs>
+
+### Interactions
+
+<Accordion title="How HealthChecker interacts with other components">
+  - **BackendPool**: Calls `getAllBackends()` to get the full list, then calls `markHealthy()` or `markUnhealthy()`
+  - **Logger**: Reports health status changes for observability
+  - Runs independently in the background, not triggered by requests
+</Accordion>
+
+<Note>
+  Health checks run **in parallel** using `Promise.all()`. This prevents a single slow backend from blocking health evaluation of other backends.
+</Note>
+
+---
+
+## ProxyHandler
+
+**Purpose**: Express middleware that forwards requests to selected backends and handles failures.
+
+### Interface
+
+```typescript
+// src/proxy/proxyHandler.ts
+export function ProxyHandler(
+  loadBalancer: LoadBalancer,
+  backendPool: BackendPool
+) {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    const startTime = Date.now();
+    let backend;
+
+    try {
+      backend = loadBalancer.pickBackend();
+    } catch (err) {
+      Logger.error("No healthy backends available");
+      res.status(503).send("No healthy backends available");
+      return;
+    }
+
+    Logger.request(req.method, req.path, backend.url);
+
+    const proxyMiddleware = proxy(backend.url, {
+      userResDecorator: (proxyRes, proxyResData, userReq, userRes) => {
+        const duration = Date.now() - startTime;
+        Logger.response(req.method, req.path, backend.url, proxyRes.statusCode || 0, duration);
+        return proxyResData;
+      },
+      proxyErrorHandler: (err, res, next) => {
+        const duration = Date.now() - startTime;
+        Logger.error(`Backend failed after ${duration}ms`, backend.url);
+        backendPool.markUnhealthy(backend.url);
+        res.status(502).send("Bad gateway");
+      }
+    });
+    return proxyMiddleware(req, res, next);
+  };
+}
+```
+
+### Responsibilities
+
+- Asks `LoadBalancer` to pick a healthy backend
+- Measures request/response timing
+- Forwards the request using `express-http-proxy`
+- Handles proxy errors by marking backends unhealthy
+- Returns appropriate HTTP status codes (`502` for backend failure, `503` for no backends)
+
+### Error handling strategy
+
+<Accordion title="Error scenarios and responses">
+  **No healthy backends**:
+  - Status: `503 Service Unavailable`
+  - Logged as: `ERROR: No healthy backends available`
+  
+  **Backend fails during proxy**:
+  - Status: `502 Bad Gateway`
+  - Backend marked unhealthy immediately
+  - Logged as: `ERROR: Backend failed after Xms (http://backend:port)`
+</Accordion>
+
+### Interactions
+
+<Accordion title="How ProxyHandler interacts with other components">
+  - **LoadBalancer**: Calls `pickBackend()` to get the target backend
+  - **BackendPool**: Calls `markUnhealthy()` when a proxy request fails
+  - **Logger**: Reports requests, responses, and errors
+  - **Express**: Registered as middleware via `app.use("/", ProxyHandler(...))`
+</Accordion>
+
+---
+
+## Logger
+
+**Purpose**: Provides structured, categorized logging for observability.
+
+### Interface
+
+```typescript
+// src/utils/logger.ts
+export class Logger {
+  static request(method: string, path: string, backendUrl: string): void {
+    console.log(`REQUEST: ${method} ${path} -> ${backendUrl}`);
+  }
+
+  static response(method: string, path: string, backendUrl: string, statusCode: number, duration: number): void {
+    console.log(`RESPONSE: ${method} ${path} <- ${backendUrl} [${statusCode}] ${duration}ms`);
+  }
+
+  static error(message: string, backendUrl?: string): void {
+    const backend = backendUrl ? ` (${backendUrl})` : '';
+    console.error(`ERROR: ${message}${backend}`);
+  }
+
+  static info(message: string): void {
+    console.log(`INFO: ${message}`);
+  }
+
+  static health(url: string, isHealthy: boolean, details?: string): void {
+    const status = isHealthy ? 'HEALTHY' : 'UNHEALTHY';
+    const extraInfo = details ? ` - ${details}` : '';
+    console.log(`HEALTH: ${status} ${url}${extraInfo}`);
+  }
+}
+```
+
+### Log categories
+
+<Tabs>
+  <Tab title="REQUEST">
+    Logged when a request is sent to a backend:
+    ```
+    REQUEST: GET /api/users -> http://localhost:3001
+    ```
+  </Tab>
+  
+  <Tab title="RESPONSE">
+    Logged when a backend responds:
+    ```
+    RESPONSE: GET /api/users <- http://localhost:3001 [200] 12ms
+    ```
+  </Tab>
+  
+  <Tab title="HEALTH">
+    Logged after each health check:
+    ```
+    HEALTH: HEALTHY http://localhost:3001 - status: 200
+    HEALTH: UNHEALTHY http://localhost:3002 - Connection refused
+    ```
+  </Tab>
+  
+  <Tab title="ERROR">
+    Logged when a backend fails or no backends are available:
+    ```
+    ERROR: Backend failed after 1523ms (http://localhost:3003)
+    ERROR: No healthy backends available
+    ```
+  </Tab>
+  
+  <Tab title="INFO">
+    Logged for system startup and configuration:
+    ```
+    INFO: Load balancer running on port 3000
+    INFO: Backend servers: http://localhost:3001, http://localhost:3002
+    ```
+  </Tab>
+</Tabs>
+
+### Interactions
+
+<Accordion title="How Logger interacts with other components">
+  Used by all components for structured output:
+  - **ProxyHandler**: Logs requests, responses, and errors
+  - **HealthChecker**: Logs health status changes
+  - **index.ts**: Logs startup information
+</Accordion>
+
+<Info>
+  The structured log format makes it easy to parse logs programmatically for monitoring, alerting, and analytics.
+</Info>
