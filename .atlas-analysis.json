@@ -1,0 +1,103 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "HTTP Load Balancer",
+  "projectDescription": "A Layer 7 HTTP load balancer built in TypeScript with automatic health checking, failover handling, and round-robin routing.",
+  "theme": "aspen",
+  "primaryColor": "#2563eb",
+  "lightColor": "#3b82f6",
+  "darkColor": "#1e40af",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/components",
+              "architecture/design-decisions"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/load-balancing",
+              "concepts/health-checking",
+              "concepts/backend-pool",
+              "concepts/strategies"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/configuration",
+              "operations/monitoring",
+              "operations/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core Classes",
+            "pages": [
+              "api/load-balancer",
+              "api/backend-pool",
+              "api/health-checker",
+              "api/proxy-handler"
+            ]
+          },
+          {
+            "group": "Strategies",
+            "pages": [
+              "api/round-robin"
+            ]
+          },
+          {
+            "group": "Utilities",
+            "pages": [
+              "api/logger",
+              "api/types"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Round-robin load balancing",
+    "Automatic health checking with 5-second intervals",
+    "Immediate failover on backend failure",
+    "Parallel health checks with timeout support",
+    "Structured request/response logging",
+    "Strategy pattern for extensible algorithms"
+  ],
+  "publicApiSurface": [
+    "LoadBalancer.pickBackend()",
+    "BackendPool.getHealthyBackends()",
+    "BackendPool.getAllBackends()",
+    "BackendPool.markHealthy(url)",
+    "BackendPool.markUnhealthy(url)",
+    "RoundRobin.pick(backends)",
+    "HealthChecker.start()",
+    "HealthChecker.stop()",
+    "HealthChecker.checkAll()",
+    "ProxyHandler(loadBalancer, backendPool)",
+    "Logger.request()",
+    "Logger.response()",
+    "Logger.error()",
+    "Logger.health()",
+    "Logger.info()"
+  ]
+}
